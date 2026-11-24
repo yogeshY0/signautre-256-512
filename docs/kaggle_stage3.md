@@ -2,7 +2,7 @@
 
 Ready-to-paste cells for a Kaggle notebook. The notebook version of this guide is
 [`training/signature-verification-3-dataset.ipynb`](../training/signature-verification-3-dataset.ipynb);
-it runs the A/B/C ablation and the evaluation cells end to end. Assumptions:
+it runs the A/B ablation and the evaluation cells end to end. Assumptions:
 
 * the cleaned image dataset is mounted **read-only** under `/kaggle/input`, with
   `manifest_aug.csv` somewhere inside it and the three corpus folders next to it;
@@ -178,33 +178,6 @@ for name in ("base", "aug"):
 PY
 ```
 
-## Cell 4b - drop SigResize (`--train-datasets BHSig260,CEDAR`)
-
-Same augmentation and seed as Cell 3; only the training corpora change. Validation and
-test still contain every corpus, so all three runs are measured on the same test split.
-
-```bash
-%%bash
-set -euo pipefail
-source /kaggle/working/paths.env
-cd /kaggle/working/repo
-python -u -m training.train_siamese \
-  --manifest "$MANIFEST" \
-  --image-root "$IMAGE_ROOT" \
-  --already-preprocessed \
-  --image_height 256 \
-  --image_width 512 \
-  --seed 42 \
-  --phase1-epochs 5 \
-  --phase2-epochs 40 \
-  --select-by eer \
-  --references 3 --reference-selection medoid \
-  --augment \
-  --train-datasets BHSig260,CEDAR \
-  --workers 4 \
-  --output-dir /kaggle/working/ckpt_no_sigresize 2>&1 | tee /kaggle/working/train_no_sigresize.log
-```
-
 ## Cell 5 - fit the fusion config
 
 Fitted on validation signers only, with skilled-forgery negatives only
@@ -262,7 +235,7 @@ python -u -m training.evaluate \
   --image_height 256 \
   --image_width 512 \
   --references 3 --reference-selection medoid \
-  --reference-counts 1,2,3 \
+  --reference-counts 2,3 \
   --target-frr 0.10 \
   --bootstrap 1000 \
   --device cuda \
@@ -286,7 +259,7 @@ python -u -m training.evaluate \
 | `confidence_intervals.deep.pooled` | 95% signer-level bootstrap CI for AUC/EER |
 | `operating_point_frr.deep.test` | 10% FRR operating point: skilled and random acceptance |
 | `per_signer.deep.worst_frr` / `worst_far` | weakest writers |
-| `reference_sweep` | 1/2/3 reference comparison; 3 is primary |
+| `reference_sweep` | 2/3 reference comparison; 3 is primary |
 | `deep_vs_fused` | per-dataset deep vs fused skilled EER and `keep_fusion` / `deep_only` |
 | `calibration.deep` / `calibration.fused` | FAR/FRR under one global threshold vs a per-dataset validation threshold |
 
