@@ -7,11 +7,19 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import cv2
+import numpy as np
 import torch
 
+from preprocessing.signature_preprocessing import (
+    load_preprocessed_image,
+    to_model_input,
+)
+from training.augment import SignatureAugment
 from training.stage3_metric_learning import (
     PKBatchSampler,
     SiameseSignatureModel,
+    SignatureDataset,
     SignatureRecord,
     load_manifest,
     triplet_loss,
@@ -216,6 +224,85 @@ class SiameseModelTests(unittest.TestCase):
         image = torch.randn(2, 3, 192, 384)
         similarity = self.model.compare(image, image)
         self.assertTrue(torch.allclose(similarity, torch.ones(2), atol=1e-5))
+
+
+class DatasetAugmentationTests(unittest.TestCase):
+    """The augmenter must be reachable from training data only, never from val/test."""
+
+    @staticmethod
+    def _write(path: Path, thickness: int = 6) -> Path:
+        image = np.full((256, 512), 255, dtype=np.uint8)
+        points = np.array([[50, 170], [180, 80], [330, 180], [460, 90]], dtype=np.int32)
+        cv2.polylines(image, [points], False, 0, thickness=thickness)
+        if not cv2.imwrite(str(path), image):
+            raise RuntimeError(f"could not write {path}")
+        return path
+
+    def _dataset(
+        self, directory: str, *, count: int = 1, augment: SignatureAugment | None = None
+    ) -> SignatureDataset:
+        paths = [
+            self._write(Path(directory) / f"sig_{index}.png", thickness=4 + index)
+            for index in range(count)
+        ]
+        records = [
+            SignatureRecord(image_path=path, signer_id="s", is_forgery=False)
+            for path in paths
+        ]
+        return SignatureDataset(
+            records,
+            {"s": 0},
+            already_preprocessed=True,
+            image_height=256,
+            image_width=512,
+            augment=augment,
+        )
+
+    @staticmethod
+    def _baseline(dataset: SignatureDataset, index: int = 0) -> torch.Tensor:
+        image = load_preprocessed_image(
+            dataset.records[index].image_path,
+            already_preprocessed=True,
+            image_height=256,
+            image_width=512,
+        )
+        return torch.from_numpy(to_model_input(image))
+
+    def test_validation_dataset_returns_the_unmodified_image(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = self._dataset(directory)
+            self.assertIsNone(dataset.augment)
+            tensor, signer_index, is_forgery = dataset[0]
+            self.assertTrue(torch.equal(tensor, self._baseline(dataset)))
+            self.assertEqual(signer_index, 0)
+            self.assertFalse(is_forgery)
+
+    def test_train_dataset_repeats_within_an_epoch_and_changes_across_epochs(self) -> None:
+        # p_rot=1 keeps this deterministic: a draw without any transform would be
+        # identical to the input and could not prove the epoch changed the stream.
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = self._dataset(
+                directory, augment=SignatureAugment(seed=42, p_rot=1.0)
+            )
+            dataset.set_epoch(0)
+            first = dataset[0][0]
+            second = dataset[0][0]
+            self.assertTrue(torch.equal(first, second))
+            dataset.set_epoch(1)
+            third = dataset[0][0]
+            self.assertFalse(torch.equal(first, third))
+
+    def test_augmentation_actually_changes_the_pixels(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = self._dataset(
+                directory, count=20, augment=SignatureAugment(seed=42)
+            )
+            dataset.set_epoch(0)
+            baselines = [self._baseline(dataset, index) for index in range(20)]
+            changed = [
+                not torch.equal(dataset[index][0], baselines[index]) for index in range(20)
+            ]
+            self.assertTrue(any(changed), "no sample was augmented across 20 draws")
 
 
 if __name__ == "__main__":
