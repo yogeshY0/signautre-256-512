@@ -1,26 +1,30 @@
 # Kaggle: Stage 3 training, fusion and evaluation (256x512)
 
-Ready-to-paste cells for a Kaggle notebook. Assumptions:
+Ready-to-paste cells for a Kaggle notebook. The notebook version of this guide is
+[`training/signature-verification-3-dataset.ipynb`](../training/signature-verification-3-dataset.ipynb);
+it runs the A/B/C ablation and the evaluation cells end to end. Assumptions:
 
 * the cleaned image dataset is mounted **read-only** under `/kaggle/input`, with
   `manifest_aug.csv` somewhere inside it and the three corpus folders next to it;
-* the code comes from a GitHub clone (or a Kaggle code dataset).
+* the code comes from `https://github.com/yogeshY0/signautre-256-512.git` (or a Kaggle
+  code dataset);
+* the accelerator is a **T4 GPU** and **Internet is ON** (pretrained ConvNeXt weights).
 
 Nothing here writes to `/kaggle/input`. Every output goes to `/kaggle/working`, which
 is what the notebook's *Output* tab offers for download when the session ends.
 
 > **Before running:** the commands below use `--select-by`, `--augment/--no-augment`,
-> `--image_height/--image_width` and `--target-far`. If the clone does not have them,
-> the repository has not been pushed since they were added. Either push first, or upload
-> the repository folder as a Kaggle *code* dataset and point `REPO_DIR` at it.
+> `--train-datasets`, `--balance-datasets`, `--image_height/--image_width`,
+> `--target-far` and `--max-random-queries`. If the clone does not have them, the
+> repository has not been pushed since they were added.
 
 ## Cell 0 - setup
 
 ```bash
 %%bash
 set -euo pipefail
-REPO_URL="https://github.com/acharyayush/Signature-Verification-FIRST-.git"
-REPO_DIR="/kaggle/working/Signature-Verification-FIRST-"
+REPO_URL="https://github.com/yogeshY0/signautre-256-512.git"
+REPO_DIR="/kaggle/working/repo"
 
 if [ ! -d "$REPO_DIR/.git" ]; then
   git clone "$REPO_URL" "$REPO_DIR"
@@ -88,7 +92,7 @@ Read-only. Fails loudly, before anything is trained, if a row is broken.
 %%bash
 set -euo pipefail
 source /kaggle/working/paths.env
-cd /kaggle/working/Signature-Verification-FIRST-
+cd /kaggle/working/repo
 python -m training.verify_data --manifest "$MANIFEST" --image-root "$IMAGE_ROOT"
 ```
 
@@ -100,13 +104,16 @@ augmenter is ever changed.
 
 45 epochs = 5 warmup with a frozen backbone + 40 fine-tune with cosine decay.
 `--select-by eer` picks the checkpoint on validation skilled-forgery EER, which is the
-number reported at the end.
+number reported at the end. `p_thin` is 0 by default (the SigResize audit measured 33.6%
+median ink loss from thinning), group 2 stays off, and `--balance-datasets` stays off
+unless an ablation shows it helps. Every epoch's JSON line carries `epoch_seconds` and
+`elapsed_seconds`.
 
 ```bash
 %%bash
 set -euo pipefail
 source /kaggle/working/paths.env
-cd /kaggle/working/Signature-Verification-FIRST-
+cd /kaggle/working/repo
 python -u -m training.train_siamese \
   --manifest "$MANIFEST" \
   --image-root "$IMAGE_ROOT" \
@@ -131,7 +138,7 @@ Same seed, same epochs, same sampler, same selection metric. The only difference
 %%bash
 set -euo pipefail
 source /kaggle/working/paths.env
-cd /kaggle/working/Signature-Verification-FIRST-
+cd /kaggle/working/repo
 python -u -m training.train_siamese \
   --manifest "$MANIFEST" \
   --image-root "$IMAGE_ROOT" \
@@ -169,16 +176,45 @@ for name in ("base", "aug"):
 PY
 ```
 
-## Cell 5 - fit the fusion config
+## Cell 4b - drop SigResize (`--train-datasets BHSig260,CEDAR`)
 
-Fitted on validation signers only. The out-of-fold threshold it stores is what
-`evaluate` will use, so this cell must run before Cell 6.
+Same augmentation and seed as Cell 3; only the training corpora change. Validation and
+test still contain every corpus, so all three runs are measured on the same test split.
 
 ```bash
 %%bash
 set -euo pipefail
 source /kaggle/working/paths.env
-cd /kaggle/working/Signature-Verification-FIRST-
+cd /kaggle/working/repo
+python -u -m training.train_siamese \
+  --manifest "$MANIFEST" \
+  --image-root "$IMAGE_ROOT" \
+  --already-preprocessed \
+  --image_height 256 \
+  --image_width 512 \
+  --seed 42 \
+  --phase1-epochs 5 \
+  --phase2-epochs 40 \
+  --select-by eer \
+  --augment \
+  --train-datasets BHSig260,CEDAR \
+  --workers 4 \
+  --output-dir /kaggle/working/ckpt_no_sigresize 2>&1 | tee /kaggle/working/train_no_sigresize.log
+```
+
+## Cell 5 - fit the fusion config
+
+Fitted on validation signers only, with skilled-forgery negatives only
+(`--max-random-queries 0`). Random impostor pairs are left to evaluation; including them
+here would let a huge random set dominate an out-of-fold threshold that is meant to
+separate genuine from skilled forgeries. The stored threshold is what `evaluate` uses,
+so this cell must run before the fused evaluation.
+
+```bash
+%%bash
+set -euo pipefail
+source /kaggle/working/paths.env
+cd /kaggle/working/repo
 python -u -m training.fit_fusion \
   --checkpoint /kaggle/working/ckpt_aug/best_model.pt \
   --manifest "$MANIFEST" \
@@ -189,6 +225,7 @@ python -u -m training.fit_fusion \
   --references 5 \
   --device cuda \
   --workers 4 \
+  --max-random-queries 0 \
   --output /kaggle/working/fusion_aug.json
 ```
 
@@ -201,11 +238,19 @@ Thresholds are chosen on validation signers and applied unchanged to test. `--ta
 adds the operating point a checklist review cares about; `per_dataset` is where CEDAR
 shows up if it is still the weak corpus.
 
+Fusion is **opt-in**: run each checkpoint without `--fusion-config` for the deep
+baseline, then add the fused report only for the run you intend to ship. The report
+contains `deep_vs_fused` (per-dataset skilled EER and a `keep_fusion` / `deep_only`
+recommendation) and `calibration` (FAR/FRR at one global threshold versus a threshold
+fitted on each dataset's own validation split). The human-readable tables are printed to
+stderr, so stdout remains a single JSON document. Keep fusion only when the recommendation
+is `keep_fusion`; a pooled win that hides a worse corpus is not a win.
+
 ```bash
 %%bash
 set -euo pipefail
 source /kaggle/working/paths.env
-cd /kaggle/working/Signature-Verification-FIRST-
+cd /kaggle/working/repo
 python -u -m training.evaluate \
   --checkpoint /kaggle/working/ckpt_aug/best_model.pt \
   --manifest "$MANIFEST" \
@@ -232,16 +277,38 @@ python -u -m training.evaluate \
 | `fusion.test` | deep + handcrafted; only worth shipping if `eer_skilled` drops and `eer_random` does not collapse |
 | `operating_point.deep.test` | FAR/FRR at the FAR budget, threshold from validation |
 | `operating_point.fused.test` | same for the fused score |
+| `deep_vs_fused` | per-dataset deep vs fused skilled EER and `keep_fusion` / `deep_only` |
+| `calibration.deep` / `calibration.fused` | FAR/FRR under one global threshold vs a per-dataset validation threshold |
 
 Report the **skilled** numbers, not the average of skilled and random. A run is only an
 improvement if `per_dataset.test.CEDAR.eer_skilled` also moves; CEDAR holds 9 test
 signers, so a single flipped pair moves it by several points and the confidence interval
 is wide.
 
+## Building the Kaggle dataset zip
+
+Run this **locally** (the `training_clean/` folder is not on Kaggle). The archive is flat:
+the manifests stay at the root and the corpus folders sit beside them. `.DS_Store`,
+`aug_preview.png`, `preview.py` and old zips are excluded.
+
+```bash
+cd /Users/yogesh/c0DE/Signature-Verification-FIRST-/training_clean
+zip -r training_clean_256x512.zip . \
+  -x '.DS_Store' -x '*/.DS_Store' -x 'aug_preview.png' -x 'preview.py' -x '*.zip'
+ls -lh training_clean_256x512.zip
+du -h training_clean_256x512.zip
+```
+
+Upload the zip as a private Kaggle dataset. The notebook's path cell finds
+`manifest_aug.csv` anywhere under `/kaggle/input`, so the dataset slug does not matter.
+
 ## Session notes
 
 * `/kaggle/working` is wiped when the session ends. Download `best_model.pt`,
-  `fusion_aug.json`, `report_aug.json` and both training logs before stopping.
+  `fusion_aug.json`, `report_aug.json` and the training logs before stopping; the notebook
+  also writes `artifacts_256x512.tar.gz` with all three checkpoints and reports.
+* The training log lines include `epoch_seconds` and `elapsed_seconds`, so a slower run is
+  visible immediately rather than only at the end.
 * Only the best checkpoint is written, so an interrupted run loses the epochs after the
   last improvement. If 45 epochs does not fit the session, lower `--phase2-epochs` rather
   than splitting the run: the cosine schedule assumes one continuous fine-tune phase.
