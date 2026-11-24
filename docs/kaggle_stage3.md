@@ -124,6 +124,7 @@ python -u -m training.train_siamese \
   --phase1-epochs 5 \
   --phase2-epochs 40 \
   --select-by eer \
+  --references 3 --reference-selection medoid \
   --augment \
   --workers 4 \
   --output-dir /kaggle/working/ckpt_aug 2>&1 | tee /kaggle/working/train_aug.log
@@ -149,6 +150,7 @@ python -u -m training.train_siamese \
   --phase1-epochs 5 \
   --phase2-epochs 40 \
   --select-by eer \
+  --references 3 --reference-selection medoid \
   --no-augment \
   --workers 4 \
   --output-dir /kaggle/working/ckpt_base 2>&1 | tee /kaggle/working/train_base.log
@@ -196,6 +198,7 @@ python -u -m training.train_siamese \
   --phase1-epochs 5 \
   --phase2-epochs 40 \
   --select-by eer \
+  --references 3 --reference-selection medoid \
   --augment \
   --train-datasets BHSig260,CEDAR \
   --workers 4 \
@@ -222,20 +225,20 @@ python -u -m training.fit_fusion \
   --already-preprocessed \
   --image_height 256 \
   --image_width 512 \
-  --references 5 \
+  --references 3 --reference-selection medoid \
   --device cuda \
   --workers 4 \
   --max-random-queries 0 \
   --output /kaggle/working/fusion_aug.json
 ```
 
-`--references 5` must match the value used during training, otherwise the validation
-queries the fusion fitter scores are not the ones the checkpoint was selected on.
+`--references 3` and `--reference-selection medoid` must match training, otherwise the validation
+queries the fusion fitter scores are not the ones the checkpoint was selected on. Medoid selection must match too.
 
 ## Cell 6 - evaluate deep and fused
 
 Thresholds are chosen on validation signers and applied unchanged to test. `--target-far`
-adds the operating point a checklist review cares about; `per_dataset` is where CEDAR
+adds the operating point a checklist review cares about; the report also has AUC, 95% signer-level bootstrap CIs, the 10% FRR point and worst-writer tables. `per_dataset` is where CEDAR
 shows up if it is still the weak corpus.
 
 Fusion is **opt-in**: run each checkpoint without `--fusion-config` for the deep
@@ -258,7 +261,10 @@ python -u -m training.evaluate \
   --already-preprocessed \
   --image_height 256 \
   --image_width 512 \
-  --references 5 \
+  --references 3 --reference-selection medoid \
+  --reference-counts 1,2,3 \
+  --target-frr 0.10 \
+  --bootstrap 1000 \
   --device cuda \
   --workers 4 \
   --fusion-config /kaggle/working/fusion_aug.json \
@@ -277,6 +283,10 @@ python -u -m training.evaluate \
 | `fusion.test` | deep + handcrafted; only worth shipping if `eer_skilled` drops and `eer_random` does not collapse |
 | `operating_point.deep.test` | FAR/FRR at the FAR budget, threshold from validation |
 | `operating_point.fused.test` | same for the fused score |
+| `confidence_intervals.deep.pooled` | 95% signer-level bootstrap CI for AUC/EER |
+| `operating_point_frr.deep.test` | 10% FRR operating point: skilled and random acceptance |
+| `per_signer.deep.worst_frr` / `worst_far` | weakest writers |
+| `reference_sweep` | 1/2/3 reference comparison; 3 is primary |
 | `deep_vs_fused` | per-dataset deep vs fused skilled EER and `keep_fusion` / `deep_only` |
 | `calibration.deep` / `calibration.fused` | FAR/FRR under one global threshold vs a per-dataset validation threshold |
 
