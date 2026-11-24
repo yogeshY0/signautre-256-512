@@ -210,6 +210,9 @@ def load_preprocessed_image(
     *,
     already_preprocessed: bool = False,
     ink: InkPolarity = "auto",
+    target_size: tuple[int, int] = DEFAULT_TARGET_SIZE,
+    image_height: int | None = None,
+    image_width: int | None = None,
 ) -> np.ndarray:
     """Read one signature image and return the ``target_h x target_w`` uint8 grayscale.
 
@@ -229,14 +232,27 @@ def load_preprocessed_image(
         raise FileNotFoundError(f"could not read signature image: {image_path}")
 
     if already_preprocessed:
-        expected_shape = (DEFAULT_TARGET_SIZE[1], DEFAULT_TARGET_SIZE[0])
+        expected_width = image_width if image_width is not None else target_size[0]
+        expected_height = image_height if image_height is not None else target_size[1]
+        expected_shape = (expected_height, expected_width)
         if image.shape != expected_shape:
             raise ValueError(
-                f"preprocessed image {image_path} has shape {image.shape}; "
-                f"expected {expected_shape}"
+                f"preprocessed image {image_path} has shape (H={image.shape[0]}, "
+                f"W={image.shape[1]}); expected (H={expected_height}, W={expected_width})"
+            )
+        if image.dtype != np.uint8:
+            raise ValueError(
+                f"preprocessed image {image_path} has dtype {image.dtype}; expected uint8"
             )
         return image
-    return preprocess_signature(image, ink=ink)
+    if ink not in {"auto", "light", "dark"}:
+        raise ValueError(f"unsupported ink polarity: {ink}")
+    return preprocess_signature(
+        image,
+        target_size=(expected_width if image_width is not None else target_size[0],
+                     expected_height if image_height is not None else target_size[1]),
+        ink=ink,
+    )
 
 
 def to_model_input(image: np.ndarray) -> np.ndarray:

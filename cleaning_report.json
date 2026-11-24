@@ -1,0 +1,45 @@
+{
+  "exact_duplicates_removed": 1118,
+  "final": {
+    "classes": {
+      "forgery": 11639,
+      "genuine": 8909
+    },
+    "copied_files": 20548,
+    "datasets": {
+      "BHSig260": 11472,
+      "CEDAR": 1708,
+      "SigResize": 7368
+    },
+    "rows": 20548,
+    "signers_per_split": {
+      "test": 62,
+      "train": 296,
+      "val": 63
+    },
+    "splits": {
+      "test": 3033,
+      "train": 14401,
+      "val": 3114
+    }
+  },
+  "open_failures": [],
+  "rows": {
+    "after_duplicate_removal": 21498,
+    "after_open_validation": 22616,
+    "after_signer_filter": 20548,
+    "after_thai_removal": 20697,
+    "before": 22616
+  },
+  "signer_rows_removed": 149,
+  "signers_removed": [
+    "BHSig260_bn_003",
+    "BHSig260_bn_100",
+    "BHSig260_hi_158",
+    "CEDAR_14",
+    "CEDAR_17",
+    "CEDAR_37",
+    "CEDAR_8"
+  ],
+  "thai_rows_removed": 801
+}
