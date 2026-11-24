@@ -4,3 +4,22 @@ __pycache__/
 .DS_Store
 data/
 checkpoints/
+
+# Datasets and generated pixels: never commit images or archives.
+dataset/
+dataset.zip
+preprocessed_*/
+preprocessed_newdataset*/
+preprocessed_outputs/
+training_clean/*/
+training_clean/*.zip
+training_clean/aug_preview.png
+testing_preprocessing_sample/
+audit_sigresize/
+audit_embeddings/
+audit_histograms/
+*.tar.gz
+
+# Manifests are small and are the data contract, so they stay tracked.
+!training_clean/manifest_clean.csv
+!training_clean/manifest_aug.csv
