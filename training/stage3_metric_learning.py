@@ -19,17 +19,24 @@ from preprocessing.signature_preprocessing import (
     load_preprocessed_image,
     to_model_input,
 )
+from training.augment import SignatureAugment
 
 MiningMode = Literal["semi-hard", "batch-hard"]
 
 
 @dataclass(frozen=True)
 class SignatureRecord:
-    """One manifest example and the signer whose identity it represents."""
+    """One manifest example and the signer whose identity it represents.
+
+    ``dataset`` is the source corpus (``BHSig260``, ``CEDAR``, ``SigResize``). It is
+    carried through to evaluation so FAR/FRR can be reported per source; it is never an
+    input to the model. Manifests without the column yield an empty string.
+    """
 
     image_path: Path
     signer_id: str
     is_forgery: bool
+    dataset: str = ""
 
 
 def _parse_bool(value: str, *, row_number: int) -> bool:
@@ -88,6 +95,8 @@ def load_manifest(
                 image_path=path.resolve(),
                 signer_id=signer_id,
                 is_forgery=_parse_bool(row["is_forgery"], row_number=row_number),
+                # Optional column: evaluation groups its report by it, training ignores it.
+                dataset=(row.get("dataset") or "").strip(),
             )
             if split == "train":
                 train.append(record)
@@ -125,7 +134,9 @@ def read_split(
     scoring exactly the same records.
 
     Args:
-        manifest: CSV manifest with ``image_path,signer_id,is_forgery,split``.
+        manifest: CSV manifest with ``image_path,signer_id,is_forgery,split``. The
+            optional ``dataset`` column is carried into ``SignatureRecord.dataset`` and
+            drives the per-dataset report in :mod:`training.evaluate`.
         root: Directory used to resolve relative image paths.
         splits: Lower-case split names to keep, e.g. ``{"val", "validation"}``.
 
@@ -146,6 +157,7 @@ def read_split(
                     image_path=(path if path.is_absolute() else image_root / path).resolve(),
                     signer_id=row["signer_id"].strip(),
                     is_forgery=row["is_forgery"].strip().lower() in {"1", "true", "yes"},
+                    dataset=(row.get("dataset") or "").strip(),
                 )
             )
     if not records:
@@ -163,14 +175,27 @@ class SignatureDataset(Dataset[tuple[Tensor, int, bool]]):
         *,
         already_preprocessed: bool = False,
         ink: Literal["auto", "light", "dark"] = "auto",
+        image_height: int = 256,
+        image_width: int = 512,
+        augment: SignatureAugment | None = None,
     ) -> None:
         self.records = list(records)
         self.signer_to_index = signer_to_index
         self.already_preprocessed = already_preprocessed
         self.ink = ink
+        self.image_height = image_height
+        self.image_width = image_width
+        # Only the train dataset receives an augmenter; validation and test pass None so
+        # their pixels stay untouched and the validation EER measures the real images.
+        self.augment = augment
 
     def __len__(self) -> int:
         return len(self.records)
+
+    def set_epoch(self, epoch: int) -> None:
+        """Forward the epoch so augmentation is reproducible per (seed, epoch, index)."""
+        if self.augment is not None:
+            self.augment.set_epoch(epoch)
 
     def __getitem__(self, index: int) -> tuple[Tensor, int, bool]:
         record = self.records[index]
@@ -180,7 +205,14 @@ class SignatureDataset(Dataset[tuple[Tensor, int, bool]]):
             record.image_path,
             already_preprocessed=self.already_preprocessed,
             ink=self.ink,
+            image_height=self.image_height,
+            image_width=self.image_width,
         )
+        # Augment the uint8 image before normalization: every transform works on 0-255
+        # pixels, and the augmenter never sees the label, so genuine and forged samples
+        # get identical treatment.
+        if self.augment is not None:
+            preprocessed = self.augment(preprocessed, index=index)
         # The model accepts three channels; preprocessing repeats grayscale for RGB.
         tensor = torch.from_numpy(to_model_input(preprocessed))
         return tensor, self.signer_to_index[record.signer_id], record.is_forgery
@@ -393,6 +425,8 @@ def embed_records(
     device: torch.device | str = "cpu",
     batch_size: int = 64,
     workers: int = 0,
+    image_height: int = 256,
+    image_width: int = 512,
 ) -> np.ndarray:
     """Embed ``records`` in order and return an ``(N, embedding_dim)`` float array.
 
@@ -413,6 +447,8 @@ def embed_records(
         records,
         {record.signer_id: 0 for record in records},
         already_preprocessed=already_preprocessed,
+        image_height=image_height,
+        image_width=image_width,
     )
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=workers)
     model.eval()

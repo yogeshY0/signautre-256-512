@@ -388,28 +388,36 @@ def describe_records(
     threshold: int | None = None,
     keep_masks: bool = False,
     progress_every: int = 200,
+    image_height: int | None = None,
+    image_width: int | None = None,
 ) -> list[SignatureDescriptors]:
     """Describe every manifest record, reading images exactly as the model does.
 
-    ``already_preprocessed`` and ``ink`` are forwarded to
-    :func:`preprocessing.signature_preprocessing.load_preprocessed_image`, the same
+    ``already_preprocessed``, ``ink``, ``image_height`` and ``image_width`` are forwarded
+    to :func:`preprocessing.signature_preprocessing.load_preprocessed_image`, the same
     loader the training dataset uses. Keeping one loading path is what prevents the
     handcrafted features from being computed on different pixels than the CNN sees.
 
     Args:
         records: Manifest records exposing an ``image_path`` attribute.
-        already_preprocessed: Read files as ``192 x 384`` grayscale instead of running
-            Stage 2.2 preprocessing.
+        already_preprocessed: Read files as grayscale of the declared size instead of
+            running Stage 2.2 preprocessing.
         ink: Retained for preprocessing compatibility; ignored by Stage 2.2.
         threshold: Fixed ink cut forwarded to :func:`describe_image`.
         keep_masks: Retain masks and skeletons in each descriptor.
         progress_every: Print progress every N images. ``0`` disables it.
+        image_height: Expected/explicit preprocessed height; ``None`` uses the default.
+        image_width: Expected/explicit preprocessed width; ``None`` uses the default.
     """
     descriptors: list[SignatureDescriptors] = []
     total = len(records)
     for index, record in enumerate(records, start=1):
         image = load_preprocessed_image(
-            record.image_path, already_preprocessed=already_preprocessed, ink=ink
+            record.image_path,
+            already_preprocessed=already_preprocessed,
+            ink=ink,
+            image_height=image_height,
+            image_width=image_width,
         )
         descriptors.append(describe_image(image, threshold=threshold, keep_masks=keep_masks))
         if progress_every and index % progress_every == 0:

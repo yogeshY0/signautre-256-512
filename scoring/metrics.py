@@ -81,3 +81,38 @@ def eer(
 ) -> float:
     """Return only the equal error rate at the best threshold."""
     return eer_threshold(genuine, negatives)[1]
+
+
+def threshold_at_far(
+    genuine: np.ndarray | list[float],
+    negatives: np.ndarray | list[float],
+    target_far: float,
+) -> tuple[float, float]:
+    """Return the lowest threshold whose false acceptance rate is at most ``target_far``.
+
+    EER is a summary statistic; a verification system usually has to respect a fixed FAR
+    budget instead. Candidates are the observed scores plus one step above the maximum,
+    so even ``target_far`` close to 0 is reachable. Among the admissible thresholds the
+    *lowest* is returned because it is the one that still accepts the most genuine
+    pairs, i.e. the lowest false rejection rate for that budget.
+
+    Raises:
+        ValueError: If both arrays are not non-empty, or ``target_far`` is not in (0, 1).
+    """
+    genuine_array = np.asarray(genuine, dtype=np.float64)
+    negative_array = np.asarray(negatives, dtype=np.float64)
+    if genuine_array.size == 0 or negative_array.size == 0:
+        raise ValueError("genuine and negative score arrays must both be non-empty")
+    if not 0.0 < target_far < 1.0:
+        raise ValueError("target_far must be strictly between 0 and 1")
+
+    candidates = np.unique(np.concatenate([genuine_array, negative_array]))
+    # One step past the largest observed score makes FAR = 0 admissible at any target.
+    candidates = np.append(candidates, np.nextafter(candidates[-1], np.inf))
+    negative_sorted = np.sort(negative_array)
+    # count(negative >= t) for every candidate in one pass.
+    negative_below = np.searchsorted(negative_sorted, candidates, side="left")
+    false_acceptance = (negative_array.size - negative_below) / negative_array.size
+    # The last candidate always admits everything, so ``admissible`` is never empty.
+    best_index = int(np.flatnonzero(false_acceptance <= target_far)[0])
+    return float(candidates[best_index]), float(false_acceptance[best_index])
