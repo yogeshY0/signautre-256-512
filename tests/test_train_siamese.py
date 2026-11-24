@@ -15,9 +15,9 @@ from unittest import mock
 
 import numpy as np
 
-from scoring.fusion import enroll_and_build_queries, score_queries
 from scoring.metrics import eer_threshold
-from training import train_siamese
+from training import evaluate, train_siamese
+from training.protocol import skilled_eer
 from training.stage3_metric_learning import SignatureRecord
 
 REFERENCES = 1
@@ -55,56 +55,69 @@ def _embeddings(forgeries_placed_on_their_signer: bool) -> np.ndarray:
     return np.asarray(rows, dtype=np.float64)
 
 
-def _select(embeddings: np.ndarray, max_random_queries: int | None = 0):
+def _select(embeddings: np.ndarray):
     """Run the selection metric with the embedding pass patched out."""
     records = _records()
-    enrollment = enroll_and_build_queries(
-        records, REFERENCES, max_random_queries=max_random_queries
-    )
     with mock.patch.object(
         train_siamese, "embed_records", return_value=embeddings
     ) as patched:
         value = train_siamese._validation_skilled_eer(
             None,
             records,
-            enrollment,
+            REFERENCES,
             "cpu",
             already_preprocessed=True,
             image_height=256,
             image_width=512,
             batch_size=8,
         )
-    return value, patched, enrollment, records
+    return value, patched, records
 
 
 class ValidationEerTests(unittest.TestCase):
     def test_matches_the_evaluation_protocol(self) -> None:
         embeddings = _embeddings(forgeries_placed_on_their_signer=False)
-        value, _, enrollment, _ = _select(embeddings)
+        value, _, records = _select(embeddings)
 
-        scores = score_queries(embeddings, [], enrollment)
-        expected = eer_threshold(scores["deep_genuine"], scores["deep_skilled"])[1]
+        # Selection goes through the shared protocol...
+        expected = skilled_eer(records, embeddings, REFERENCES)
+        # ...and evaluation scores the same records through its own split helper.
+        scores, _ = evaluate._evaluate_split(
+            records, embeddings, [], REFERENCES, None, 0
+        )
+        evaluated = eer_threshold(scores["deep_genuine"], scores["deep_skilled"])[1]
 
         self.assertAlmostEqual(value, expected)
+        self.assertAlmostEqual(value, evaluated)
         self.assertAlmostEqual(value, 0.0)
 
     def test_a_worse_embedding_space_gets_a_higher_eer(self) -> None:
-        separated, _, _, _ = _select(_embeddings(forgeries_placed_on_their_signer=False))
-        inseparable, _, _, _ = _select(_embeddings(forgeries_placed_on_their_signer=True))
+        separated, _, _ = _select(_embeddings(forgeries_placed_on_their_signer=False))
+        inseparable, _, _ = _select(_embeddings(forgeries_placed_on_their_signer=True))
         self.assertLess(separated, inseparable)
 
-    def test_random_queries_do_not_affect_the_selection_metric(self) -> None:
+    def test_selection_uses_the_configured_reference_count(self) -> None:
         embeddings = _embeddings(forgeries_placed_on_their_signer=False)
-        with_random = _select(embeddings, max_random_queries=None)[0]
-        without_random = _select(embeddings, max_random_queries=0)[0]
-        self.assertAlmostEqual(with_random, without_random)
-        self.assertIn(
-            "random", {query.kind for query in _select(embeddings, None)[2].queries}
-        )
+        records = _records()
+        with mock.patch.object(
+            train_siamese, "embed_records", return_value=embeddings
+        ), mock.patch.object(train_siamese, "skilled_eer", return_value=0.25) as metric:
+            value = train_siamese._validation_skilled_eer(
+                None,
+                records,
+                REFERENCES,
+                "cpu",
+                already_preprocessed=True,
+                image_height=256,
+                image_width=512,
+                batch_size=8,
+            )
+        self.assertEqual(value, 0.25)
+        metric.assert_called_once_with(records, embeddings, REFERENCES)
 
     def test_passes_the_preprocessing_settings_to_the_embedding_pass(self) -> None:
         embeddings = _embeddings(forgeries_placed_on_their_signer=False)
-        _, patched, _, _ = _select(embeddings)
+        _, patched, _ = _select(embeddings)
         arguments = patched.call_args.kwargs
         self.assertEqual(arguments["image_height"], 256)
         self.assertEqual(arguments["image_width"], 512)

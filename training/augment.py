@@ -6,7 +6,9 @@ Each transform fires independently, so most images get 1-3 changes and some stay
 Settings are drawn per image. The class never sees the label, so genuine and forged
 images get identical chances (the model cannot learn "distorted = forged").
 
-Group 1 (default): rotation, scale+shift, thickness, lighter ink, blur, noise/JPEG
+Group 1 (default): rotation, scale+shift, thickness (thicken only), lighter ink, blur,
+noise/JPEG. Thinning is available but off by default (`p_thin=0`): the SigResize audit
+measured 33.6% median ink loss from thinning on every corpus.
 Group 2 (group2=True, add only after Group 1 works): junk pasting, brightness/contrast
 
 Not included on purpose: flips, elastic/heavy warps, cutout/erasing, colour changes.
@@ -22,7 +24,7 @@ class SignatureAugment:
     def __init__(self, group2=False, seed=None,
                  p_rot=0.40, p_rot_big=0.10, rot_small=8.0, rot_big=15.0,
                  p_scaleshift=0.40, scale=0.10, shift=0.05,
-                 p_thick=0.25, p_thin=0.15,
+                 p_thick=0.25, p_thin=0.0,
                  p_light=0.20, light_max=0.40,
                  p_blur=0.25, blur_sigma=(0.5, 1.0),
                  p_noise_jpeg=0.25, noise_sigma=(2.0, 5.0), jpeg_q=(60, 90),

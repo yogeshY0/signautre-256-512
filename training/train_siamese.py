@@ -7,6 +7,7 @@ import json
 import math
 import os
 import random
+import time
 import warnings
 from pathlib import Path
 from typing import Literal, Sequence
@@ -15,9 +16,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from scoring.fusion import Enrollment, enroll_and_build_queries, score_queries
-from scoring.metrics import eer_threshold
 from training.augment import SignatureAugment
+from training.protocol import skilled_eer
 from training.stage3_metric_learning import (
     PKBatchSampler,
     SignatureDataset,
@@ -121,7 +121,7 @@ def _improves(candidate: float, best: float) -> bool:
 def _validation_skilled_eer(
     model: SiameseSignatureModel,
     records: Sequence[SignatureRecord],
-    enrollment: Enrollment,
+    references: int,
     device: torch.device,
     *,
     already_preprocessed: bool,
@@ -131,11 +131,10 @@ def _validation_skilled_eer(
 ) -> float:
     """Return the skilled-forgery EER on the validation signers.
 
-    Uses the same protocol as ``training.evaluate``: the first references of each signer
-    are enrolled and a query scores as its mean cosine similarity to them. Selecting on
-    that number means the checkpoint is chosen by the metric it is reported on. Random
-    pairs play no part in the choice, so the enrollment carries none and the per-epoch
-    cost is limited to the genuine and skilled queries.
+    Delegates the enrollment and scoring to :func:`training.protocol.skilled_eer`, which
+    ``training.evaluate`` is tested against, so checkpoint selection cannot drift from
+    the reported metric. Random pairs play no part in the choice, which keeps the
+    per-epoch cost to the genuine and skilled queries.
 
     The call leaves the model in eval mode; ``_run_epoch`` restores train mode on the
     next training epoch.
@@ -149,9 +148,7 @@ def _validation_skilled_eer(
         image_height=image_height,
         image_width=image_width,
     )
-    scores = score_queries(embeddings, [], enrollment)
-    _, skilled_eer = eer_threshold(scores["deep_genuine"], scores["deep_skilled"])
-    return float(skilled_eer)
+    return skilled_eer(records, embeddings, references)
 
 
 def _require_existing_images(*groups: Sequence[SignatureRecord]) -> None:
@@ -243,10 +240,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--image_width", type=int, default=512)
     parser.add_argument("--no-pretrained", action="store_true")
     parser.add_argument("--phase1-epochs", type=int, default=5)
-    parser.add_argument("--phase2-epochs", type=int, default=20)
+    parser.add_argument("--phase2-epochs", type=int, default=40)
     parser.add_argument("--signers-per-batch", type=int, default=12)
     parser.add_argument("--genuine-per-signer", type=int, default=4)
     parser.add_argument("--forgeries-per-signer", type=int, default=2)
+    parser.add_argument(
+        "--balance-datasets",
+        action="store_true",
+        help=(
+            "Give every source corpus an equal share of signers in each batch. "
+            "Off by default; only enable it if the ablation shows it helps."
+        ),
+    )
     parser.add_argument("--margin", type=float, default=0.3)
     parser.add_argument(
         "--augment",
@@ -359,6 +364,7 @@ def main() -> None:
         signers_per_batch=args.signers_per_batch,
         genuine_per_signer=args.genuine_per_signer,
         forgeries_per_signer=args.forgeries_per_signer,
+        balance_datasets=args.balance_datasets,
         seed=args.seed,
     )
     validation_eligible_signers = {
@@ -404,17 +410,6 @@ def main() -> None:
         persistent_workers=False,
     )
 
-    # Built once: the enrollment depends only on the manifest, so rebuilding it every
-    # epoch would cost time without changing a single query. No random pairs are built
-    # because checkpoint selection never looks at them.
-    validation_enrollment = (
-        enroll_and_build_queries(
-            validation_records, args.references, max_random_queries=0
-        )
-        if args.select_by == "eer"
-        else None
-    )
-
     print(f"Using device: {device}")
     model = SiameseSignatureModel(pretrained=not args.no_pretrained).to(device)
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -428,6 +423,7 @@ def main() -> None:
         ("fine_tune", args.phase2_epochs, 1e-4, "batch-hard"),
     ]
     global_epoch = 0
+    run_start = time.perf_counter()
     for phase_name, epoch_count, learning_rate, mining in phases:
         if epoch_count == 0:
             continue
@@ -451,6 +447,7 @@ def main() -> None:
             else None
         )
         for phase_epoch in range(epoch_count):
+            epoch_start = time.perf_counter()
             train_sampler.set_epoch(global_epoch)
             train_dataset.set_epoch(global_epoch)
             train_metrics = _run_epoch(
@@ -475,11 +472,11 @@ def main() -> None:
             # the semi-hard and batch-hard phases.
             validation_eer: float | None = None
             selection_value = validation_metrics["loss"]
-            if validation_enrollment is not None:
+            if args.select_by == "eer":
                 validation_eer = _validation_skilled_eer(
                     model,
                     validation_records,
-                    validation_enrollment,
+                    args.references,
                     device,
                     already_preprocessed=args.already_preprocessed,
                     image_height=args.image_height,
@@ -488,6 +485,8 @@ def main() -> None:
                 )
                 selection_value = validation_eer
 
+            epoch_seconds = time.perf_counter() - epoch_start
+            elapsed_seconds = time.perf_counter() - run_start
             global_epoch += 1
             print(
                 json.dumps(
@@ -495,6 +494,8 @@ def main() -> None:
                         "phase": phase_name,
                         "epoch": phase_epoch + 1,
                         "lr": optimizer.param_groups[0]["lr"],
+                        "epoch_seconds": round(epoch_seconds, 1),
+                        "elapsed_seconds": round(elapsed_seconds, 1),
                         "train": train_metrics,
                         "validation": validation_metrics,
                         "validation_eer_skilled": validation_eer,
@@ -537,6 +538,7 @@ def main() -> None:
                         "train_datasets": (
                             sorted(set(args.train_datasets)) if args.train_datasets else "all"
                         ),
+                        "balance_datasets": args.balance_datasets,
                     },
                     checkpoint_path,
                 )
@@ -551,7 +553,8 @@ def main() -> None:
     print(
         f"Best checkpoint: {checkpoint_path} "
         f"({args.select_by} {best_selection:.4f}{best_eer_text}, "
-        f"val loss {best_validation_loss:.4f})"
+        f"val loss {best_validation_loss:.4f}, "
+        f"total {time.perf_counter() - run_start:.1f}s)"
     )
 
 

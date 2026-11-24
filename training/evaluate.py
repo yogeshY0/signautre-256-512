@@ -23,6 +23,12 @@ Two extras beyond the headline numbers:
 * ``--target-far`` picks the threshold that meets a fixed FAR budget on the validation
   signers and reports the resulting FRR on validation and test, deep and fused. That is
   the operating point a checklist review usually cares about, unlike the EER.
+* ``calibration`` compares one global threshold with a per-dataset threshold chosen on
+  that dataset's validation signers, then reports FAR/FRR on test under both. It shows
+  whether a single decision point is miscalibrated for a corpus.
+* ``deep_vs_fused`` prints the skilled EER of the deep and fused scores per dataset and
+  recommends ``deep_only`` unless fusion improves *every* corpus on validation. Fusion
+  is opt-in, so the deep baseline is the default run.
 
 Usage:
     python -m training.evaluate --checkpoint checkpoints/cedar_v1/best_model.pt \
@@ -35,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -159,6 +166,256 @@ def _metrics(scores: dict[str, np.ndarray], prefix: str, threshold: float) -> di
     }
 
 
+def _dataset_scores(
+    scores: dict[str, np.ndarray],
+    datasets: dict[str, list[str]],
+    prefix: str,
+    kind: str,
+    dataset: str,
+) -> np.ndarray:
+    """Return one kind of score for one dataset, in score order."""
+    mask = np.asarray([label == dataset for label in datasets[kind]], dtype=bool)
+    return scores[f"{prefix}_{kind}"][mask]
+
+
+def _rates_for_dataset(
+    scores: dict[str, np.ndarray],
+    datasets: dict[str, list[str]],
+    prefix: str,
+    dataset: str,
+    threshold: float,
+) -> dict[str, object] | None:
+    """Return test FAR/FRR for one dataset at one fixed threshold."""
+    genuine = _dataset_scores(scores, datasets, prefix, "genuine", dataset)
+    skilled = _dataset_scores(scores, datasets, prefix, "skilled", dataset)
+    if genuine.size == 0 or skilled.size == 0:
+        return None
+    far, frr = rates_at_threshold(genuine, skilled, threshold)
+    return {
+        "far_skilled_at_threshold": float(far),
+        "frr_at_threshold": float(frr),
+        "genuine_queries": int(genuine.size),
+        "skilled_forgeries": int(skilled.size),
+    }
+
+
+def _calibration_block(
+    val_scores: dict[str, np.ndarray],
+    test_scores: dict[str, np.ndarray],
+    val_datasets: dict[str, list[str]],
+    test_datasets: dict[str, list[str]],
+    prefix: str,
+    target_far: float | None,
+) -> dict[str, object]:
+    """Compare one global threshold with per-dataset thresholds chosen on validation.
+
+    Every threshold is fitted on the validation signers only. The test table then shows
+    whether a single decision point is miscalibrated for a corpus: the same global
+    threshold can be fine on BHSig260 and too loose on CEDAR. The per-dataset threshold
+    is fitted on that dataset's validation split and applied unchanged to test, so it is
+    a legitimate comparison rather than test-set tuning.
+
+    Args:
+        val_scores/test_scores: Score dictionaries with ``f"{prefix}_genuine"`` and
+            ``f"{prefix}_skilled"`` arrays.
+        val_datasets/test_datasets: Per-query dataset labels aligned with the scores.
+        prefix: ``"deep"`` or ``"fused"``.
+        target_far: Optional fixed FAR budget; when set, a second threshold pair is
+            computed at that budget.
+
+    Returns:
+        A JSON-serialisable block; empty when there are no validation scores.
+    """
+    genuine_val = val_scores[f"{prefix}_genuine"]
+    skilled_val = val_scores[f"{prefix}_skilled"]
+    if genuine_val.size == 0 or skilled_val.size == 0:
+        return {}
+    global_threshold, global_eer = eer_threshold(genuine_val, skilled_val)
+    block: dict[str, object] = {
+        "global_threshold": float(global_threshold),
+        "global_validation_eer_skilled": float(global_eer),
+        "target_far": target_far,
+        "datasets": {},
+    }
+    global_far_threshold: float | None = None
+    if target_far is not None:
+        global_far_threshold, achieved = threshold_at_far(
+            genuine_val, skilled_val, target_far
+        )
+        block["global_threshold_at_far"] = float(global_far_threshold)
+        block["global_validation_far_achieved"] = float(achieved)
+
+    datasets: dict[str, dict[str, object]] = {}
+    for dataset in sorted(set(val_datasets["genuine"]) | set(val_datasets["skilled"])):
+        dataset_genuine = _dataset_scores(
+            val_scores, val_datasets, prefix, "genuine", dataset
+        )
+        dataset_skilled = _dataset_scores(
+            val_scores, val_datasets, prefix, "skilled", dataset
+        )
+        if dataset_genuine.size == 0 or dataset_skilled.size == 0:
+            continue
+        dataset_threshold, dataset_eer = eer_threshold(dataset_genuine, dataset_skilled)
+        entry: dict[str, object] = {
+            "validation_eer_skilled": float(dataset_eer),
+            "threshold": float(dataset_threshold),
+            "test_at_global_threshold": _rates_for_dataset(
+                test_scores, test_datasets, prefix, dataset, float(global_threshold)
+            ),
+            "test_at_dataset_threshold": _rates_for_dataset(
+                test_scores, test_datasets, prefix, dataset, float(dataset_threshold)
+            ),
+        }
+        if global_far_threshold is not None and target_far is not None:
+            dataset_far_threshold, dataset_far = threshold_at_far(
+                dataset_genuine, dataset_skilled, target_far
+            )
+            entry["threshold_at_far"] = float(dataset_far_threshold)
+            entry["validation_far_achieved"] = float(dataset_far)
+            entry["test_at_global_far_threshold"] = _rates_for_dataset(
+                test_scores, test_datasets, prefix, dataset, global_far_threshold
+            )
+            entry["test_at_dataset_far_threshold"] = _rates_for_dataset(
+                test_scores, test_datasets, prefix, dataset, dataset_far_threshold
+            )
+        datasets[dataset] = entry
+    block["datasets"] = datasets
+    return block
+
+
+def _fusion_comparison(
+    deep_per_dataset: dict[str, dict[str, dict[str, object]]],
+    fused_per_dataset: dict[str, dict[str, dict[str, object]]],
+) -> dict[str, object]:
+    """Summarise whether fusion improves every corpus on validation.
+
+    Fusion is report-only unless it lowers the skilled EER for *every* dataset, not just
+    the pooled average. A corpus that gets worse is a miscalibrated handcrafted branch,
+    not a rounding error, so the recommendation stays ``deep_only``.
+    """
+    rows: dict[str, dict[str, object]] = {}
+    for dataset in sorted(set(deep_per_dataset["val"]) & set(fused_per_dataset["val"])):
+        deep_val = deep_per_dataset["val"][dataset].get("eer_skilled")
+        fused_val = fused_per_dataset["val"][dataset].get("eer_skilled")
+        if deep_val is None or fused_val is None:
+            continue
+        deep_test = deep_per_dataset["test"].get(dataset, {}).get("eer_skilled")
+        fused_test = fused_per_dataset["test"].get(dataset, {}).get("eer_skilled")
+        rows[dataset] = {
+            "deep_val": float(deep_val),
+            "fused_val": float(fused_val),
+            "delta_val": float(fused_val) - float(deep_val),
+            "deep_test": None if deep_test is None else float(deep_test),
+            "fused_test": None if fused_test is None else float(fused_test),
+            "delta_test": (
+                None
+                if deep_test is None or fused_test is None
+                else float(fused_test) - float(deep_test)
+            ),
+        }
+    helps = bool(rows) and all(
+        row["fused_val"] < row["deep_val"] for row in rows.values()
+    )
+    return {
+        "datasets": rows,
+        "helps_every_dataset": helps,
+        "recommendation": "keep_fusion" if helps else "deep_only",
+    }
+
+
+def _number(value: object, spec: str = ".4f") -> str:
+    return "n/a" if value is None else format(float(value), spec)
+
+
+def _print_dataset_comparison(
+    deep_per_dataset: dict[str, dict[str, dict[str, object]]],
+    fused_per_dataset: dict[str, dict[str, dict[str, object]]] | None = None,
+) -> None:
+    """Print deep (and, when available, fused) skilled EER per dataset."""
+    print("--- deep vs fused per dataset (skilled EER) ---", file=sys.stderr)
+    print(
+        f"{'dataset':<12}{'deep_val':>10}{'deep_test':>11}"
+        f"{'fused_val':>11}{'fused_test':>12}{'delta_test':>12}",
+        file=sys.stderr,
+    )
+    datasets = set(deep_per_dataset["val"]) | set(deep_per_dataset["test"])
+    if fused_per_dataset is not None:
+        datasets |= set(fused_per_dataset["val"]) | set(fused_per_dataset["test"])
+    for dataset in sorted(datasets):
+        deep_val = deep_per_dataset["val"].get(dataset, {}).get("eer_skilled")
+        deep_test = deep_per_dataset["test"].get(dataset, {}).get("eer_skilled")
+        fused_val = (
+            fused_per_dataset["val"].get(dataset, {}).get("eer_skilled")
+            if fused_per_dataset is not None
+            else None
+        )
+        fused_test = (
+            fused_per_dataset["test"].get(dataset, {}).get("eer_skilled")
+            if fused_per_dataset is not None
+            else None
+        )
+        delta = (
+            None
+            if deep_test is None or fused_test is None
+            else float(fused_test) - float(deep_test)
+        )
+        print(
+            f"{dataset:<12}{_number(deep_val):>10}{_number(deep_test):>11}"
+            f"{_number(fused_val):>11}{_number(fused_test):>12}{_number(delta):>12}",
+            file=sys.stderr,
+        )
+    print(file=sys.stderr)
+
+
+def _print_calibration(name: str, block: dict[str, object]) -> None:
+    """Print the global-threshold versus per-dataset-threshold comparison."""
+    if not block or not block.get("datasets"):
+        return
+    print(
+        f"--- calibration ({name}): global threshold vs per-dataset threshold on test ---",
+        file=sys.stderr,
+    )
+    print(
+        f"  global threshold from validation: {float(block['global_threshold']):.4f}",
+        file=sys.stderr,
+    )
+    header = (
+        f"{'dataset':<12}{'thr_ds':>9}{'FAR_global':>12}{'FRR_global':>12}"
+        f"{'FAR_ds':>9}{'FRR_ds':>9}"
+    )
+    print(header, file=sys.stderr)
+    for dataset, entry in block["datasets"].items():  # type: ignore[union-attr]
+        at_global = entry.get("test_at_global_threshold") or {}
+        at_dataset = entry.get("test_at_dataset_threshold") or {}
+        print(
+            f"{dataset:<12}{_number(entry.get('threshold')):>9}"
+            f"{_number(at_global.get('far_skilled_at_threshold')):>12}"
+            f"{_number(at_global.get('frr_at_threshold')):>12}"
+            f"{_number(at_dataset.get('far_skilled_at_threshold')):>9}"
+            f"{_number(at_dataset.get('frr_at_threshold')):>9}",
+            file=sys.stderr,
+        )
+    if block.get("target_far") is not None:
+        print(
+            f"  at FAR budget {float(block['target_far']):g}: "
+            f"global threshold {float(block['global_threshold_at_far']):.4f}",
+            file=sys.stderr,
+        )
+        print(header, file=sys.stderr)
+        for dataset, entry in block["datasets"].items():  # type: ignore[union-attr]
+            at_global = entry.get("test_at_global_far_threshold") or {}
+            at_dataset = entry.get("test_at_dataset_far_threshold") or {}
+            print(
+                f"{dataset:<12}{_number(entry.get('threshold_at_far')):>9}"
+                f"{_number(at_global.get('far_skilled_at_threshold')):>12}"
+                f"{_number(at_global.get('frr_at_threshold')):>12}"
+                f"{_number(at_dataset.get('far_skilled_at_threshold')):>9}"
+                f"{_number(at_dataset.get('frr_at_threshold')):>9}",
+                file=sys.stderr,
+            )
+    print(file=sys.stderr)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--checkpoint", type=Path, required=True)
@@ -174,7 +431,11 @@ def main() -> None:
     parser.add_argument(
         "--fusion-config",
         type=Path,
-        help="Fusion config written by training.fit_fusion; enables fused scoring.",
+        help=(
+            "Fusion config written by training.fit_fusion. Fusion is opt-in: omit this "
+            "flag for the deep baseline, and keep the fused scorer only when the "
+            "per-dataset verdict says it helps every corpus."
+        ),
     )
     parser.add_argument(
         "--fusion-report",
@@ -289,6 +550,7 @@ def main() -> None:
         },
     }
 
+    fused_per_dataset: dict[str, dict[str, dict[str, object]]] | None = None
     if scorer is not None and config is not None:
         fused_threshold, fused_val_eer = eer_threshold(
             fused["val"]["fused_genuine"], fused["val"]["fused_skilled"]
@@ -301,6 +563,12 @@ def main() -> None:
         else:
             applied = fused_threshold
             threshold_source = "validation_eer"
+        fused_per_dataset = {
+            "val": _per_dataset_metrics(fused["val"], datasets["val"], "fused", applied),
+            "test": _per_dataset_metrics(
+                fused["test"], datasets["test"], "fused", applied
+            ),
+        }
         report["fusion"] = {
             "config": str(Path(args.fusion_config).expanduser().resolve()),  # type: ignore[union-attr]
             "type": config.type,
@@ -311,12 +579,7 @@ def main() -> None:
             "threshold_source": threshold_source,
             "validation_eer_skilled": fused_val_eer,
             "test": _metrics(fused["test"], "fused", applied),
-            "per_dataset": {
-                "val": _per_dataset_metrics(fused["val"], datasets["val"], "fused", applied),
-                "test": _per_dataset_metrics(
-                    fused["test"], datasets["test"], "fused", applied
-                ),
-            },
+            "per_dataset": fused_per_dataset,
         }
 
     # A fixed FAR budget is what an operations team actually signs off on; EER is only
@@ -348,6 +611,47 @@ def main() -> None:
                 "test": _far_frr(fused["test"], "fused", fused_far_threshold),
             }
         report["operating_point"] = operating
+
+    report["deep_vs_fused"] = (
+        _fusion_comparison(report["per_dataset"], fused_per_dataset)  # type: ignore[arg-type]
+        if fused_per_dataset is not None
+        else None
+    )
+
+    calibration: dict[str, object] = {
+        "deep": _calibration_block(
+            deep["val"],
+            deep["test"],
+            datasets["val"],
+            datasets["test"],
+            "deep",
+            args.target_far,
+        )
+    }
+    if fused_per_dataset is not None:
+        calibration["fused"] = _calibration_block(
+            fused["val"],
+            fused["test"],
+            datasets["val"],
+            datasets["test"],
+            "fused",
+            args.target_far,
+        )
+    report["calibration"] = calibration
+
+    # Tables go to stderr so stdout stays a single JSON document.
+    _print_dataset_comparison(report["per_dataset"], fused_per_dataset)  # type: ignore[arg-type]
+    if report["deep_vs_fused"] is not None:
+        verdict = report["deep_vs_fused"]  # type: ignore[assignment]
+        print(
+            f"FUSION VERDICT: {verdict['recommendation']} "
+            f"(helps every dataset: {verdict['helps_every_dataset']})",
+            file=sys.stderr,
+        )
+    _print_calibration("deep", calibration["deep"])  # type: ignore[arg-type]
+    if "fused" in calibration:
+        _print_calibration("fused", calibration["fused"])  # type: ignore[arg-type]
+    print(file=sys.stderr)
 
     text = json.dumps(report, indent=2)
     print(text)

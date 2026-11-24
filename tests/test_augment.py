@@ -140,6 +140,19 @@ class OperationTests(unittest.TestCase):
         )
         self.assertFalse(seen & GROUP2_OPERATIONS)
 
+    def test_thinning_is_off_by_default(self) -> None:
+        """The audit measured 33.6% median ink loss from thinning, so it is opt-in."""
+        augmenter = SignatureAugment(seed=3)
+        self.assertEqual(augmenter.p_thin, 0.0)
+        for index in range(200):
+            _, used = augmenter(self.image, return_ops=True, index=index)
+            self.assertNotIn("thin", used)
+
+    def test_thinning_runs_when_explicitly_enabled(self) -> None:
+        augmenter = _augmenter(p_thin=1.0)
+        _, used = augmenter(self.image, return_ops=True, index=0)
+        self.assertIn("thin", used)
+
     def test_group2_fires_when_explicitly_enabled(self) -> None:
         augmenter = SignatureAugment(seed=1, group2=True, p_bc=1.0)
         for index in range(20):

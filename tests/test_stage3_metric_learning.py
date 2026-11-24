@@ -111,6 +111,64 @@ class PKBatchSamplerTests(unittest.TestCase):
             PKBatchSampler(records, signers_per_batch=2, genuine_per_signer=2)
 
 
+class BalancedSamplerTests(unittest.TestCase):
+    """``--balance-datasets`` is opt-in and gives every corpus an equal batch share."""
+
+    @staticmethod
+    def _records(counts: dict[str, int]) -> list[SignatureRecord]:
+        records: list[SignatureRecord] = []
+        for dataset, signers in counts.items():
+            for signer in range(signers):
+                signer_id = f"{dataset}_{signer}"
+                records.extend(
+                    SignatureRecord(
+                        Path(f"{signer_id}_{index}.png"), signer_id, False, dataset
+                    )
+                    for index in range(3)
+                )
+        return records
+
+    def test_balance_datasets_is_off_by_default(self) -> None:
+        sampler = PKBatchSampler(
+            self._records({"BHSig260": 2, "CEDAR": 2}),
+            signers_per_batch=2,
+            genuine_per_signer=2,
+        )
+        self.assertFalse(sampler.balance_datasets)
+
+    def test_each_batch_has_an_equal_share_of_both_corpora(self) -> None:
+        records = self._records({"BHSig260": 6, "CEDAR": 6})
+        sampler = PKBatchSampler(
+            records,
+            signers_per_batch=4,
+            genuine_per_signer=2,
+            balance_datasets=True,
+            seed=1,
+        )
+        batches = list(sampler)
+        self.assertEqual(len(batches), 3)
+        for batch in batches:
+            counts = {"BHSig260": 0, "CEDAR": 0}
+            for index in batch:
+                counts[records[index].dataset] += 1
+            self.assertEqual(counts, {"BHSig260": 4, "CEDAR": 4})
+
+    def test_a_small_corpus_takes_its_slots_and_the_rest_go_to_the_larger_one(self) -> None:
+        records = self._records({"BHSig260": 1, "CEDAR": 5})
+        sampler = PKBatchSampler(
+            records,
+            signers_per_batch=4,
+            genuine_per_signer=2,
+            balance_datasets=True,
+            seed=2,
+        )
+        batch = next(iter(sampler))
+        counts = {"BHSig260": 0, "CEDAR": 0}
+        for index in batch:
+            counts[records[index].dataset] += 1
+        self.assertEqual(counts, {"BHSig260": 2, "CEDAR": 6})
+
+
 class TripletLossTests(unittest.TestCase):
     def setUp(self) -> None:
         self.embeddings = torch.tensor(

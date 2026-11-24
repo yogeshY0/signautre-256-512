@@ -152,8 +152,12 @@ def main() -> None:
     parser.add_argument(
         "--max-random-queries",
         type=int,
-        default=None,
-        help="Deterministic cap on random query pairs (default: use every pair).",
+        default=0,
+        help=(
+            "Deterministic cap on random query pairs. The default 0 fits fusion on "
+            "genuine and skilled-forgery pairs only; random impostors are left to "
+            "training.evaluate, which reports them."
+        ),
     )
     args = parser.parse_args()
 

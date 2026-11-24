@@ -232,6 +232,7 @@ class PKBatchSampler(Sampler[list[int]]):
         signers_per_batch: int,
         genuine_per_signer: int,
         forgeries_per_signer: int = 0,
+        balance_datasets: bool = False,
         seed: int = 42,
     ) -> None:
         if signers_per_batch < 2:
@@ -244,13 +245,16 @@ class PKBatchSampler(Sampler[list[int]]):
         self.signers_per_batch = signers_per_batch
         self.genuine_per_signer = genuine_per_signer
         self.forgeries_per_signer = forgeries_per_signer
+        self.balance_datasets = balance_datasets
         self.seed = seed
         self.epoch = 0
         # Keep genuine and forged record indices separate for each signer.
         self.by_signer: dict[str, dict[bool, list[int]]] = {}
+        self.signer_dataset: dict[str, str] = {}
         for index, record in enumerate(records):
             groups = self.by_signer.setdefault(record.signer_id, {False: [], True: []})
             groups[record.is_forgery].append(index)
+            self.signer_dataset.setdefault(record.signer_id, record.dataset or "unknown")
 
         self.eligible_signers = [
             signer
@@ -264,6 +268,15 @@ class PKBatchSampler(Sampler[list[int]]):
                 f"{genuine_per_signer} genuine images; found {len(self.eligible_signers)}"
             )
 
+        # Optional equal-share sampling: partition the eligible signers by corpus once,
+        # so every batch can draw a quota from each dataset without touching the index.
+        by_dataset: dict[str, list[str]] = {}
+        for signer in self.eligible_signers:
+            by_dataset.setdefault(self.signer_dataset[signer], []).append(signer)
+        self.signers_by_dataset = {
+            name: sorted(signers) for name, signers in sorted(by_dataset.items())
+        }
+
     def __len__(self) -> int:
         # Number of batches per epoch; signers are sampled anew for each batch.
         return max(1, (len(self.eligible_signers) + self.signers_per_batch - 1) // self.signers_per_batch)
@@ -272,11 +285,44 @@ class PKBatchSampler(Sampler[list[int]]):
         """Change the deterministic sampling sequence for the next epoch."""
         self.epoch = epoch
 
+    def _balanced_signer_batch(self, rng: random.Random) -> list[str]:
+        """Pick signers so every dataset fills an equal share of the batch.
+
+        Quotas are filled round-robin over the datasets, skipping one that has no
+        eligible signer left. A small corpus therefore contributes all its signers and
+        the remaining slots go to the larger corpora; a corpus is never over-sampled
+        with replacement inside one batch.
+        """
+        datasets = list(self.signers_by_dataset)
+        rng.shuffle(datasets)
+        quotas = {name: 0 for name in datasets}
+        remaining = self.signers_per_batch
+        while remaining:
+            progressed = False
+            for name in datasets:
+                if remaining and quotas[name] < len(self.signers_by_dataset[name]):
+                    quotas[name] += 1
+                    remaining -= 1
+                    progressed = True
+            if not progressed:
+                raise RuntimeError(
+                    "balanced sampling could not fill a batch; the eligible signer "
+                    "counts changed after construction"
+                )
+        batch: list[str] = []
+        for name in datasets:
+            if quotas[name]:
+                batch.extend(rng.sample(self.signers_by_dataset[name], quotas[name]))
+        return batch
+
     def __iter__(self) -> Iterator[list[int]]:
         # A local seeded RNG makes each epoch reproducible without changing global RNG.
         rng = random.Random(self.seed + self.epoch)
         for _ in range(len(self)):
-            signer_batch = rng.sample(self.eligible_signers, self.signers_per_batch)
+            if self.balance_datasets:
+                signer_batch = self._balanced_signer_batch(rng)
+            else:
+                signer_batch = rng.sample(self.eligible_signers, self.signers_per_batch)
             indices: list[int] = []
             for signer in signer_batch:
                 groups = self.by_signer[signer]
