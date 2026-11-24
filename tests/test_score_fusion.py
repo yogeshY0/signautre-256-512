@@ -748,9 +748,22 @@ class EnrollmentTests(unittest.TestCase):
             [query.index for query in second.queries],
         )
 
-    def test_rejects_a_signer_with_too_few_genuine_images(self) -> None:
-        with self.assertRaisesRegex(ValueError, "too few genuine"):
-            enroll_and_build_queries(_records(), 7)
+    def test_enrols_exactly_the_reference_count_without_genuine_queries(self) -> None:
+        enrollment = enroll_and_build_queries(_records(), 7)
+        self.assertEqual(len(enrollment.references), 2)
+        self.assertEqual(enrollment.skipped_signers, ())
+        self.assertFalse(any(q.kind == "genuine" for q in enrollment.queries))
+
+    def test_skips_signers_with_too_few_genuine_images(self) -> None:
+        records = _records(count_per_signer=7, forgeries=1)
+        records.append(SignatureRecord(Path("c_0.png"), "c", False))
+        enrollment = enroll_and_build_queries(records, 5)
+        self.assertEqual(enrollment.skipped_signers, ("c",))
+        self.assertEqual(len(enrollment.references), 2)
+
+    def test_raises_when_no_signer_has_enough_genuine_images(self) -> None:
+        with self.assertRaisesRegex(ValueError, "no signer has at least"):
+            enroll_and_build_queries(_records(), 8)
 
 
 

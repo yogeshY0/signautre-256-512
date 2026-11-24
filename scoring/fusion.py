@@ -32,6 +32,7 @@ from typing import Literal, Mapping, Sequence
 
 import numpy as np
 
+from scoring.reference_selection import select_reference_indices
 from scoring.handcrafted_features import (
     DISTANCE_FEATURES,
     FEATURE_NAMES,
@@ -476,6 +477,7 @@ class Enrollment:
 
     references: dict[str, list[int]]
     queries: list[Query]
+    skipped_signers: tuple[str, ...] = ()
 
 
 def enroll_and_build_queries(
@@ -484,39 +486,55 @@ def enroll_and_build_queries(
     *,
     max_random_queries: int | None = None,
     seed: int = 0,
+    reference_selection: str = "first",
+    embeddings: np.ndarray | None = None,
+    already_preprocessed: bool = True,
+    ink: str = "auto",
+    image_height: int = 256,
+    image_width: int = 512,
 ) -> Enrollment:
-    """Enrol the first ``references`` genuine images per signer and list the queries.
-
-    The protocol matches ``training.evaluate`` exactly:
-
-    * genuine queries: the signer's genuine images after the first ``references``;
-    * skilled queries: every forgery of that signer;
-    * random queries: genuine queries of every *other* signer, scored against this
-      signer's references.
-
-    ``max_random_queries`` optionally caps the random query list with a deterministic
-    subsample. Random negatives outnumber genuine queries by orders of magnitude on real
-    manifests, so the cap keeps runtime reasonable while leaving the genuine and skilled
-    sets untouched. ``None`` keeps every random pair, matching the original behaviour.
-    """
-    by_signer: dict[str, dict[str, list[int]]] = defaultdict(lambda: {"gen": [], "forg": []})
+    """Enrol references and list queries, skipping undersized signers."""
+    by_signer = defaultdict(lambda: {"gen": [], "forg": []})
     for index, record in enumerate(records):
         signer_id = str(getattr(record, "signer_id"))
         is_forgery = bool(getattr(record, "is_forgery"))
         by_signer[signer_id]["forg" if is_forgery else "gen"].append(index)
 
-    enrollments: dict[str, list[int]] = {}
-    queries: list[Query] = []
+    enrollments = {}
+    reference_sets = {}
+    skipped = []
     for signer_id, groups in by_signer.items():
         genuine = groups["gen"]
-        if len(genuine) <= references:
-            raise ValueError(
-                f"{signer_id} has too few genuine signatures for {references} references"
-            )
-        enrollments[signer_id] = list(genuine[:references])
+        if len(genuine) < references:
+            skipped.append(signer_id)
+            continue
+        selected = select_reference_indices(
+            records,
+            genuine,
+            references,
+            mode=reference_selection,
+            embeddings=embeddings,
+            already_preprocessed=already_preprocessed,
+            ink=ink,
+            image_height=image_height,
+            image_width=image_width,
+        )
+        enrollments[signer_id] = selected
+        reference_sets[signer_id] = set(selected)
+    if not enrollments:
+        raise ValueError(
+            f"no signer has at least {references} genuine images"
+        )
+
+    queries = []
+    for signer_id, groups in by_signer.items():
+        if signer_id not in enrollments:
+            continue
+        selected = reference_sets[signer_id]
         queries.extend(
             Query(index=index, target_signer=signer_id, kind="genuine")
-            for index in genuine[references:]
+            for index in groups["gen"]
+            if index not in selected
         )
         queries.extend(
             Query(index=index, target_signer=signer_id, kind="skilled")
@@ -525,33 +543,40 @@ def enroll_and_build_queries(
         for other, other_groups in by_signer.items():
             if other == signer_id:
                 continue
+            other_selected = reference_sets.get(other, set())
             queries.extend(
                 Query(index=index, target_signer=signer_id, kind="random")
-                for index in other_groups["gen"][references:]
+                for index in other_groups["gen"]
+                if index not in other_selected
             )
 
     if max_random_queries is not None:
-        fixed = [query for query in queries if query.kind != "random"]
-        random_queries = [query for query in queries if query.kind == "random"]
+        fixed = [q for q in queries if q.kind != "random"]
+        random_queries = [q for q in queries if q.kind == "random"]
         if len(random_queries) > max_random_queries:
             rng = np.random.default_rng(seed)
-            chosen = rng.choice(len(random_queries), size=max_random_queries, replace=False)
-            random_queries = [random_queries[int(index)] for index in np.sort(chosen)]
+            chosen = rng.choice(
+                len(random_queries),
+                size=max_random_queries,
+                replace=False,
+            )
+            random_queries = [random_queries[int(i)] for i in np.sort(chosen)]
         queries = fixed + random_queries
 
-    # ``query_index`` records each query's position in this final list, so per-pair rows
-    # can be grouped back into the per-query unit that evaluation actually averages over.
     queries = [
         Query(
-            index=query.index,
-            target_signer=query.target_signer,
-            kind=query.kind,
+            index=q.index,
+            target_signer=q.target_signer,
+            kind=q.kind,
             query_index=position,
         )
-        for position, query in enumerate(queries)
+        for position, q in enumerate(queries)
     ]
-
-    return Enrollment(references=enrollments, queries=queries)
+    return Enrollment(
+        references=enrollments,
+        queries=queries,
+        skipped_signers=tuple(sorted(skipped)),
+    )
 
 
 def score_queries(

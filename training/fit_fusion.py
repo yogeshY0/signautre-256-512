@@ -42,6 +42,7 @@ from scoring.fusion import (
     fit_weighted_fusion,
     save_fusion_config,
 )
+from scoring.reference_selection import MODES
 from scoring.handcrafted_features import FEATURE_NAMES, describe_records
 from scoring.metrics import eer_threshold
 from training.stage3_metric_learning import (
@@ -132,7 +133,13 @@ def main() -> None:
     parser.add_argument("--already-preprocessed", action="store_true")
     parser.add_argument("--image_height", type=int, default=256)
     parser.add_argument("--image_width", type=int, default=512)
-    parser.add_argument("--references", type=int, default=5)
+    parser.add_argument("--references", type=int, default=3)
+    parser.add_argument(
+        "--reference-selection",
+        choices=MODES,
+        default="medoid",
+        help="How the genuine references are chosen (default: medoid).",
+    )
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--workers", type=int, default=0)
@@ -196,6 +203,12 @@ def main() -> None:
         records,
         args.references,
         max_random_queries=args.max_random_queries,
+        reference_selection=args.reference_selection,
+        embeddings=embeddings,
+        already_preprocessed=args.already_preprocessed,
+        ink="auto",
+        image_height=args.image_height,
+        image_width=args.image_width,
     )
     print(f"Built {len(enrollment.queries)} queries")
 
@@ -241,6 +254,7 @@ def main() -> None:
             "image_height": args.image_height,
             "image_width": args.image_width,
             "references": args.references,
+            "reference_selection": args.reference_selection,
             "fusion_type": best_type,
             "cv_folds": args.cv_folds,
             "out_of_fold_eer": out_of_fold_eer,

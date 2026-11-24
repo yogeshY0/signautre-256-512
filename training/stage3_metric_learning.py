@@ -39,6 +39,18 @@ class SignatureRecord:
     dataset: str = ""
 
 
+def source_group(record: SignatureRecord | object) -> str:
+    """Return the reporting group: split BHSig260 into Hindi and Bengali."""
+    dataset = str(getattr(record, "dataset", "") or "unknown")
+    signer = str(getattr(record, "signer_id", ""))
+    if dataset == "BHSig260":
+        if "_hi_" in signer:
+            return "BHSig260-Hindi"
+        if "_bn_" in signer:
+            return "BHSig260-Bengali"
+    return dataset
+
+
 def _parse_bool(value: str, *, row_number: int) -> bool:
     """Parse common CSV boolean spellings and report invalid values with row context."""
     normalized = value.strip().lower()

@@ -113,7 +113,10 @@ class ValidationEerTests(unittest.TestCase):
                 batch_size=8,
             )
         self.assertEqual(value, 0.25)
-        metric.assert_called_once_with(records, embeddings, REFERENCES)
+        metric.assert_called_once()
+        call_args, call_kwargs = metric.call_args
+        self.assertEqual(call_args[2], REFERENCES)
+        self.assertEqual(call_kwargs["reference_selection"], "first")
 
     def test_passes_the_preprocessing_settings_to_the_embedding_pass(self) -> None:
         embeddings = _embeddings(forgeries_placed_on_their_signer=False)

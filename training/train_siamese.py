@@ -17,6 +17,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from training.augment import SignatureAugment
+from scoring.reference_selection import MODES
 from training.protocol import skilled_eer
 from training.stage3_metric_learning import (
     PKBatchSampler,
@@ -128,6 +129,8 @@ def _validation_skilled_eer(
     image_height: int,
     image_width: int,
     batch_size: int,
+    reference_selection: str = "first",
+    ink: str = "auto",
 ) -> float:
     """Return the skilled-forgery EER on the validation signers.
 
@@ -148,7 +151,16 @@ def _validation_skilled_eer(
         image_height=image_height,
         image_width=image_width,
     )
-    return skilled_eer(records, embeddings, references)
+    return skilled_eer(
+        records,
+        embeddings,
+        references,
+        reference_selection=reference_selection,
+        already_preprocessed=already_preprocessed,
+        ink=ink,
+        image_height=image_height,
+        image_width=image_width,
+    )
 
 
 def _require_existing_images(*groups: Sequence[SignatureRecord]) -> None:
@@ -273,8 +285,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--references",
         type=int,
-        default=5,
+        default=3,
         help="Genuine references per signer used by the validation EER",
+    )
+    parser.add_argument(
+        "--reference-selection",
+        choices=MODES,
+        default="medoid",
+        help="How the genuine references are chosen (default: medoid).",
     )
     parser.add_argument(
         "--eval-batch-size",
@@ -482,6 +500,8 @@ def main() -> None:
                     image_height=args.image_height,
                     image_width=args.image_width,
                     batch_size=args.eval_batch_size,
+                    reference_selection=args.reference_selection,
+                    ink=args.ink,
                 )
                 selection_value = validation_eer
 
@@ -539,6 +559,8 @@ def main() -> None:
                             sorted(set(args.train_datasets)) if args.train_datasets else "all"
                         ),
                         "balance_datasets": args.balance_datasets,
+                        "references": args.references,
+                        "reference_selection": args.reference_selection,
                     },
                     checkpoint_path,
                 )

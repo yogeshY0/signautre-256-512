@@ -9,6 +9,8 @@ baseline numbers stay identical to the pre-fusion implementation.
 
 from __future__ import annotations
 
+from typing import Sequence
+
 import numpy as np
 
 
@@ -116,3 +118,102 @@ def threshold_at_far(
     # The last candidate always admits everything, so ``admissible`` is never empty.
     best_index = int(np.flatnonzero(false_acceptance <= target_far)[0])
     return float(candidates[best_index]), float(false_acceptance[best_index])
+
+
+def auc(
+    genuine: np.ndarray | list[float],
+    negatives: np.ndarray | list[float],
+) -> float | None:
+    """Return ROC AUC with genuine=1, or None if undefined."""
+    from sklearn.metrics import roc_auc_score
+    g = np.asarray(genuine, dtype=np.float64)
+    n = np.asarray(negatives, dtype=np.float64)
+    if g.size == 0 or n.size == 0:
+        return None
+    labels = np.concatenate([np.ones(g.size), np.zeros(n.size)])
+    scores = np.concatenate([g, n])
+    if np.unique(labels).size < 2:
+        return None
+    try:
+        return float(roc_auc_score(labels, scores))
+    except ValueError:
+        return None
+
+
+def threshold_at_frr(
+    genuine: np.ndarray | list[float],
+    negatives: np.ndarray | list[float],
+    target_frr: float,
+) -> tuple[float, float]:
+    """Return the highest threshold whose FRR is at most target_frr."""
+    g = np.asarray(genuine, dtype=np.float64)
+    n = np.asarray(negatives, dtype=np.float64)
+    if g.size == 0 or n.size == 0:
+        raise ValueError("genuine and negative score arrays must both be non-empty")
+    if not 0.0 < target_frr < 1.0:
+        raise ValueError("target_frr must be strictly between 0 and 1")
+    candidates = np.unique(np.concatenate([g, n]))
+    candidates = np.append(candidates, np.nextafter(candidates[-1], np.inf))
+    g_sorted = np.sort(g)
+    below = np.searchsorted(g_sorted, candidates, side="left")
+    frr = below / g.size
+    admissible = np.flatnonzero(frr <= target_frr)
+    index = int(admissible[-1])
+    return float(candidates[index]), float(frr[index])
+
+
+def bootstrap_ci(
+    genuine: np.ndarray | list[float],
+    negatives: np.ndarray | list[float],
+    genuine_signers: Sequence[object],
+    negative_signers: Sequence[object],
+    metric,
+    *,
+    resamples: int = 1000,
+    seed: int = 0,
+    confidence: float = 0.95,
+):
+    """Signer-level bootstrap CI for a score metric."""
+    g = np.asarray(genuine, dtype=np.float64)
+    n = np.asarray(negatives, dtype=np.float64)
+    if g.size == 0 or n.size == 0:
+        return None
+    if len(g) != len(genuine_signers) or len(n) != len(negative_signers):
+        raise ValueError("signer labels must align with the score arrays")
+    if resamples < 1 or not 0.0 < confidence < 1.0:
+        return None
+    signers = sorted({str(s) for s in genuine_signers} | {str(s) for s in negative_signers})
+    if len(signers) < 2:
+        return None
+    index = {signer: position for position, signer in enumerate(signers)}
+    g_groups = [[] for _ in signers]
+    n_groups = [[] for _ in signers]
+    for value, signer in zip(g, genuine_signers):
+        g_groups[index[str(signer)]].append(float(value))
+    for value, signer in zip(n, negative_signers):
+        n_groups[index[str(signer)]].append(float(value))
+    g_arrays = [np.asarray(group) for group in g_groups]
+    n_arrays = [np.asarray(group) for group in n_groups]
+    rng = np.random.default_rng(seed)
+    values = []
+    for _ in range(resamples):
+        chosen = rng.integers(0, len(signers), size=len(signers))
+        g_parts = [g_arrays[i] for i in chosen if g_arrays[i].size]
+        n_parts = [n_arrays[i] for i in chosen if n_arrays[i].size]
+        if not g_parts or not n_parts:
+            continue
+        gg = np.concatenate(g_parts)
+        nn = np.concatenate(n_parts)
+        try:
+            value = metric(gg, nn)
+        except (ValueError, ZeroDivisionError):
+            continue
+        if value is not None and np.isfinite(value):
+            values.append(float(value))
+    if len(values) < max(10, resamples // 2):
+        return None
+    alpha = (1.0 - confidence) / 2.0
+    return (
+        float(np.quantile(values, alpha)),
+        float(np.quantile(values, 1.0 - alpha)),
+    )

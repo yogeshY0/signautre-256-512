@@ -24,7 +24,15 @@ from scoring.metrics import eer_threshold
 
 
 def skilled_eer(
-    records: Sequence[object], embeddings: np.ndarray, references: int
+    records: Sequence[object],
+    embeddings: np.ndarray,
+    references: int,
+    *,
+    reference_selection: str = "first",
+    already_preprocessed: bool = True,
+    ink: str = "auto",
+    image_height: int = 256,
+    image_width: int = 512,
 ) -> float:
     """Return the skilled-forgery EER for one embedding matrix.
 
@@ -37,7 +45,17 @@ def skilled_eer(
         ValueError: Fewer than ``references + 1`` genuine images for a signer, or one of
             the genuine/skilled score sets is empty.
     """
-    enrollment = enroll_and_build_queries(records, references, max_random_queries=0)
+    enrollment = enroll_and_build_queries(
+        records,
+        references,
+        max_random_queries=0,
+        reference_selection=reference_selection,
+        embeddings=embeddings,
+        already_preprocessed=already_preprocessed,
+        ink=ink,
+        image_height=image_height,
+        image_width=image_width,
+    )
     scores = score_queries(embeddings, [], enrollment)
     genuine = scores["deep_genuine"]
     skilled = scores["deep_skilled"]

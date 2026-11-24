@@ -48,6 +48,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
+from scoring.reference_selection import MODES
 from scoring.fusion import Enrollment, enroll_and_build_queries, score_queries  # noqa: E402
 from scoring.metrics import eer_threshold, rates_at_threshold, threshold_at_far  # noqa: E402
 from training.stage3_metric_learning import (  # noqa: E402
@@ -78,10 +79,22 @@ def _collect(
     references: int,
     max_random_queries: int | None,
     name: str,
+    reference_selection: str = "first",
+    already_preprocessed: bool = True,
+    image_height: int = 256,
+    image_width: int = 512,
 ) -> SplitAudit:
     """Enrol, score and label one split."""
     enrollment = enroll_and_build_queries(
-        records, references, max_random_queries=max_random_queries
+        records,
+        references,
+        max_random_queries=max_random_queries,
+        reference_selection=reference_selection,
+        embeddings=embeddings,
+        already_preprocessed=already_preprocessed,
+        ink="auto",
+        image_height=image_height,
+        image_width=image_width,
     )
     scores = score_queries(embeddings, [], enrollment, None)
     # ``score_queries`` appends one score per query in enrollment order, so filtering the
@@ -89,7 +102,8 @@ def _collect(
     queries = {kind: [q for q in enrollment.queries if q.kind == kind] for kind in KINDS}
     signer_dataset: dict[str, str] = {}
     for record in records:
-        signer_dataset.setdefault(record.signer_id, record.dataset or "unknown")
+        from training.stage3_metric_learning import source_group
+        signer_dataset.setdefault(record.signer_id, source_group(record))
     labels = {
         kind: [signer_dataset[q.target_signer] for q in queries[kind]] for kind in KINDS
     }
@@ -309,7 +323,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--already-preprocessed", action="store_true")
     parser.add_argument("--image_height", type=int, default=256)
     parser.add_argument("--image_width", type=int, default=512)
-    parser.add_argument("--references", type=int, default=5)
+    parser.add_argument("--references", type=int, default=3)
+    parser.add_argument(
+        "--reference-selection",
+        choices=MODES,
+        default="medoid",
+        help="How the genuine references are chosen (default: medoid).",
+    )
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--workers", type=int, default=0)
@@ -390,7 +410,15 @@ def main() -> None:
             image_width=args.image_width,
         )
         audits[name] = _collect(
-            records, embeddings, args.references, args.max_random_queries, name
+            records,
+            embeddings,
+            args.references,
+            args.max_random_queries,
+            name,
+            reference_selection=args.reference_selection,
+            already_preprocessed=args.already_preprocessed,
+            image_height=args.image_height,
+            image_width=args.image_width,
         )
         print(
             f"{name}: {len(records):,} images | "
