@@ -129,6 +129,7 @@ def _validation_skilled_eer(
     image_height: int,
     image_width: int,
     batch_size: int,
+    workers: int = 0,
     reference_selection: str = "first",
     ink: str = "auto",
 ) -> float:
@@ -148,6 +149,7 @@ def _validation_skilled_eer(
         already_preprocessed=already_preprocessed,
         device=device,
         batch_size=batch_size,
+        workers=workers,
         image_height=image_height,
         image_width=image_width,
     )
@@ -306,6 +308,15 @@ def _parse_args() -> argparse.Namespace:
         default=True,
         help="Cosine LR decay across the fine-tune phase (warmup stays flat)",
     )
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=0,
+        help=(
+            "Early stopping: end the fine-tune phase after this many epochs without a "
+            "better selection metric. 0 disables it (default). Warmup is never stopped."
+        ),
+    )
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -331,6 +342,8 @@ def main() -> None:
         raise ValueError("references must be at least 1")
     if args.eval_batch_size < 1:
         raise ValueError("eval-batch-size must be positive")
+    if args.patience < 0:
+        raise ValueError("patience cannot be negative")
 
     device = _device_from_argument(args.device)
     _set_seed(args.seed, device)
@@ -445,6 +458,7 @@ def main() -> None:
     for phase_name, epoch_count, learning_rate, mining in phases:
         if epoch_count == 0:
             continue
+        stale_epochs = 0
         if phase_name == "warmup":
             model.freeze_backbone()
         else:
@@ -500,6 +514,7 @@ def main() -> None:
                     image_height=args.image_height,
                     image_width=args.image_width,
                     batch_size=args.eval_batch_size,
+                    workers=args.workers,
                     reference_selection=args.reference_selection,
                     ink=args.ink,
                 )
@@ -564,8 +579,17 @@ def main() -> None:
                     },
                     checkpoint_path,
                 )
+                stale_epochs = 0
+            elif phase_name == "fine_tune":
+                stale_epochs += 1
             if scheduler is not None:
                 scheduler.step()
+            if args.patience and phase_name == "fine_tune" and stale_epochs >= args.patience:
+                print(
+                    f"Early stop: no improvement for {stale_epochs} epochs "
+                    f"(best {args.select_by} {best_selection:.4f})"
+                )
+                break
 
     best_eer_text = (
         f", val skilled EER {best_validation_eer:.4f}"
