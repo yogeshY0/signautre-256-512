@@ -198,6 +198,34 @@ def _per_dataset_metrics(
     return results
 
 
+def _has_negatives(values: np.ndarray) -> bool:
+    """True when a negative-score array can be used for a rate, EER or AUC."""
+    return values is not None and np.asarray(values).size > 0
+
+
+def _safe_rates(genuine, negatives, threshold):
+    """FAR/FRR at one threshold, or ``(None, None)`` when there are no negatives.
+
+    Random negatives are empty when ``--max-random-queries 0`` is used (the fusion
+    run does this on purpose); that must not crash the report.
+    """
+    if not _has_negatives(negatives) or not _has_negatives(genuine):
+        return None, None
+    return rates_at_threshold(genuine, negatives, threshold)
+
+
+def _safe_eer(genuine, negatives):
+    if not _has_negatives(negatives) or not _has_negatives(genuine):
+        return None
+    return eer_threshold(genuine, negatives)[1]
+
+
+def _safe_auc(genuine, negatives):
+    if not _has_negatives(negatives) or not _has_negatives(genuine):
+        return None
+    return auc(genuine, negatives)
+
+
 def _far_frr(
     scores: dict[str, np.ndarray], prefix: str, threshold: float
 ) -> dict[str, float]:
@@ -206,7 +234,7 @@ def _far_frr(
     skilled = scores[f"{prefix}_skilled"]
     random_scores = scores[f"{prefix}_random"]
     far_skilled, frr = rates_at_threshold(genuine, skilled, threshold)
-    far_random, _ = rates_at_threshold(genuine, random_scores, threshold)
+    far_random, _ = _safe_rates(genuine, random_scores, threshold)
     return {
         "far_skilled_at_threshold": far_skilled,
         "far_random_at_threshold": far_random,
@@ -220,9 +248,9 @@ def _metrics(scores: dict[str, np.ndarray], prefix: str, threshold: float) -> di
     skilled = scores[f"{prefix}_skilled"]
     random = scores[f"{prefix}_random"]
     far_skilled, frr = rates_at_threshold(genuine, skilled, threshold)
-    far_random, _ = rates_at_threshold(genuine, random, threshold)
+    far_random, _ = _safe_rates(genuine, random, threshold)
     _, eer_skilled = eer_threshold(genuine, skilled)
-    _, eer_random = eer_threshold(genuine, random)
+    eer_random = _safe_eer(genuine, random)
     return {
         "far_skilled_at_threshold": far_skilled,
         "far_random_at_threshold": far_random,
@@ -230,7 +258,7 @@ def _metrics(scores: dict[str, np.ndarray], prefix: str, threshold: float) -> di
         "eer_skilled": eer_skilled,
         "eer_random": eer_random,
         "auc_skilled": auc(genuine, skilled),
-        "auc_random": auc(genuine, random),
+        "auc_random": _safe_auc(genuine, random),
         "genuine_queries": int(len(genuine)),
         "skilled_forgeries": int(len(skilled)),
         "random_pairs": int(len(random)),
@@ -520,7 +548,8 @@ def _print_operating_frr(name, block):
     skilled = test["far_skilled_at_threshold"]
     random_score = test["far_random_at_threshold"]
     rejected = test["frr_at_threshold"]
-    print(f"  test: skilled accepted {skilled:.4f} random accepted {random_score:.4f} genuine rejected {rejected:.4f}", file=sys.stderr)
+    random_text = "n/a" if random_score is None else f"{random_score:.4f}"
+    print(f"  test: skilled accepted {skilled:.4f} random accepted {random_text} genuine rejected {rejected:.4f}", file=sys.stderr)
     for dataset, row in block.get("per_dataset", {}).items():
         thr = row["threshold_from_validation"]
         sk = row["test_far_skilled"]
@@ -559,7 +588,8 @@ def _print_reference_sweep(sweep):
         test_random = test["eer_random"]
         auc_text = "n/a" if test_auc is None else f"{test_auc:.3f}"
         val_auc_text = "n/a" if val_auc is None else f"{val_auc:.3f}"
-        print(f"{refs:>4} {val_eer:>8.4f} {val_auc_text:>9} {test_eer:>9.4f} {auc_text:>10} {test_random:>16.4f}", file=sys.stderr)
+        random_text = "n/a" if test_random is None else f"{test_random:.4f}"
+        print(f"{refs:>4} {val_eer:>8.4f} {val_auc_text:>9} {test_eer:>9.4f} {auc_text:>10} {random_text:>16}", file=sys.stderr)
     print(file=sys.stderr)
 
 
@@ -575,6 +605,8 @@ def _confidence_block(
     if resamples < 1:
         return {}
     def ci(kind: str, metric) -> tuple[float, float] | None:
+        if not _has_negatives(scores[f"{prefix}_{kind}"]):
+            return None
         return bootstrap_ci(
             scores[f"{prefix}_genuine"],
             scores[f"{prefix}_{kind}"],

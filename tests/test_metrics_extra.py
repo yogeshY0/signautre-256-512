@@ -100,6 +100,55 @@ class OperatingPointFrrTests(unittest.TestCase):
         self.assertIn("far_random_at_threshold", block["test"])
 
 
+class NoRandomNegativesTests(unittest.TestCase):
+    """``--max-random-queries 0`` leaves the random-forgery list empty."""
+
+    def setUp(self):
+        self.scores = {
+            "deep_genuine": np.array([0.9, 0.8, 0.7, 0.6]),
+            "deep_skilled": np.array([0.2, 0.3, 0.75, 0.5]),
+            "deep_random": np.array([]),
+        }
+
+    def test_metrics_skip_the_random_numbers(self):
+        block = evaluate._metrics(self.scores, "deep", 0.7)
+        self.assertIsNone(block["eer_random"])
+        self.assertIsNone(block["auc_random"])
+        self.assertIsNone(block["far_random_at_threshold"])
+        self.assertEqual(block["random_pairs"], 0)
+        self.assertIsNotNone(block["eer_skilled"])
+        self.assertIsNotNone(block["frr_at_threshold"])
+
+    def test_far_frr_skips_the_random_rate(self):
+        block = evaluate._far_frr(self.scores, "deep", 0.7)
+        self.assertIsNone(block["far_random_at_threshold"])
+        self.assertIsNotNone(block["far_skilled_at_threshold"])
+
+    def test_confidence_block_skips_the_random_intervals(self):
+        signers = {"genuine": ["a", "a", "b", "b"], "skilled": ["a", "a", "b", "b"], "random": []}
+        datasets = {"genuine": ["X"] * 4, "skilled": ["X"] * 4, "random": []}
+        block = evaluate._confidence_block(
+            self.scores, signers, datasets, "deep", 20
+        )
+        self.assertIsNone(block["pooled"]["auc_random"])
+        self.assertIsNone(block["pooled"]["eer_random"])
+
+    def test_the_two_printed_tables_accept_missing_random_numbers(self):
+        metrics = evaluate._metrics(self.scores, "deep", 0.7)
+        evaluate._print_reference_sweep(
+            {"3": {"validation_eer_skilled": 0.1, "validation_auc_skilled": 0.9, "test": metrics}}
+        )
+        evaluate._print_operating_frr(
+            "deep",
+            {
+                "target_frr": 0.1,
+                "threshold_from_validation": 0.7,
+                "validation_frr_achieved": 0.1,
+                "test": evaluate._far_frr(self.scores, "deep", 0.7),
+            },
+        )
+
+
 class MetricsBlockTests(unittest.TestCase):
     def test_metrics_include_auc(self):
         scores = {

@@ -142,6 +142,21 @@ class SelectionRuleTests(unittest.TestCase):
         self.assertFalse(train_siamese._improves(float("nan"), float("nan")))
 
 
+class EarlyStopTests(unittest.TestCase):
+    """Early stopping applies to the fine-tune phase only and is off by default."""
+
+    def test_patience_zero_never_stops(self) -> None:
+        self.assertFalse(train_siamese._should_stop_early(100, 0, "fine_tune"))
+
+    def test_stops_once_stale_epochs_reach_patience(self) -> None:
+        self.assertFalse(train_siamese._should_stop_early(7, 8, "fine_tune"))
+        self.assertTrue(train_siamese._should_stop_early(8, 8, "fine_tune"))
+        self.assertTrue(train_siamese._should_stop_early(9, 8, "fine_tune"))
+
+    def test_warmup_is_never_stopped(self) -> None:
+        self.assertFalse(train_siamese._should_stop_early(50, 8, "warmup"))
+
+
 class MissingImageTests(unittest.TestCase):
     def test_missing_paths_are_reported(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

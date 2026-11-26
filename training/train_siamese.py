@@ -119,6 +119,15 @@ def _improves(candidate: float, best: float) -> bool:
     return candidate < best
 
 
+def _should_stop_early(stale_epochs: int, patience: int, phase_name: str) -> bool:
+    """Return True when the fine-tune phase should end early.
+
+    ``patience == 0`` disables early stopping. Only the fine-tune phase can stop: the
+    warmup is short and its metric is noisy while the backbone is still frozen.
+    """
+    return patience > 0 and phase_name == "fine_tune" and stale_epochs >= patience
+
+
 def _validation_skilled_eer(
     model: SiameseSignatureModel,
     records: Sequence[SignatureRecord],
@@ -584,7 +593,7 @@ def main() -> None:
                 stale_epochs += 1
             if scheduler is not None:
                 scheduler.step()
-            if args.patience and phase_name == "fine_tune" and stale_epochs >= args.patience:
+            if _should_stop_early(stale_epochs, args.patience, phase_name):
                 print(
                     f"Early stop: no improvement for {stale_epochs} epochs "
                     f"(best {args.select_by} {best_selection:.4f})"
