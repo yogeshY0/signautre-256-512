@@ -7,10 +7,11 @@ evaluation, and artifact packaging. No training was run as part of this reposito
 
 ## Dataset upload
 
-Attach the cleaned dataset as a private Kaggle dataset. Its root should contain
-`manifest_clean.csv` and the `BHSig260/`, `CEDAR/`, and `SigResize/` image folders. The
-notebook accepts the preferred Kaggle path or searches recursively under `/kaggle/input`.
-The manifest paths are relative to that root.
+Attach the cleaned dataset as a private Kaggle dataset. You can upload the extracted
+dataset root containing `manifest_clean.csv` and the `BHSig260/`, `CEDAR/`, and
+`SigResize/` image folders, or upload `training_clean_256x512.zip`. The notebook searches
+under `/kaggle/input` for the manifest and, if only the archive is present, safely extracts
+it under `/kaggle/working`. The manifest paths are relative to the dataset root.
 
 The notebook checks row counts, dataset counts per split, file resolution, signer-disjoint
 splits, and reference availability. It then runs both `training.verify_data` and
