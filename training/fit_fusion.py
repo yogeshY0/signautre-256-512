@@ -43,12 +43,17 @@ from scoring.fusion import (
     save_fusion_config,
 )
 from scoring.reference_selection import MODES
-from scoring.handcrafted_features import FEATURE_NAMES, describe_records
+from scoring.handcrafted_features import (
+    FEATURE_NAMES,
+    describe_records,
+    require_supported_image_size,
+)
 from scoring.metrics import eer_threshold
 from training.stage3_metric_learning import (
     SiameseSignatureModel,
     embed_records,
     read_split,
+    validate_checkpoint_image_size,
 )
 
 
@@ -131,8 +136,8 @@ def main() -> None:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--image-root", type=Path)
     parser.add_argument("--already-preprocessed", action="store_true")
-    parser.add_argument("--image_height", type=int, default=256)
-    parser.add_argument("--image_width", type=int, default=512)
+    parser.add_argument("--image_height", type=int, default=192)
+    parser.add_argument("--image_width", type=int, default=384)
     parser.add_argument("--references", type=int, default=3)
     parser.add_argument(
         "--reference-selection",
@@ -167,9 +172,16 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+    require_supported_image_size(args.image_height, args.image_width)
 
     root = (args.image_root or args.manifest.parent).resolve()
     checkpoint = torch.load(args.checkpoint, map_location="cpu")
+    validate_checkpoint_image_size(
+        checkpoint,
+        image_height=args.image_height,
+        image_width=args.image_width,
+        checkpoint_path=args.checkpoint,
+    )
     model = SiameseSignatureModel(
         pretrained=False, embedding_dim=checkpoint["embedding_dim"]
     )

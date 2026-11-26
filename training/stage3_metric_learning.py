@@ -6,7 +6,7 @@ import csv
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Literal, Sequence
+from typing import Iterator, Literal, Mapping, Sequence
 
 import numpy as np
 import timm
@@ -130,6 +130,51 @@ def load_manifest(
         examples = ", ".join(sorted(overlap)[:5])
         raise ValueError(f"signers must be disjoint across train, val, and test: {examples}")
     return train, validation
+
+
+def validate_checkpoint_image_size(
+    checkpoint: Mapping[str, object],
+    *,
+    image_height: int,
+    image_width: int,
+    checkpoint_path: str | Path | None = None,
+) -> None:
+    """Reject evaluation when a checkpoint's trained image size differs from the request."""
+    label = str(checkpoint_path) if checkpoint_path is not None else "checkpoint"
+    preprocessing = checkpoint.get("preprocessing")
+    if not isinstance(preprocessing, Mapping):
+        raise ValueError(f"{label} is missing preprocessing image-size metadata")
+
+    saved_height = preprocessing.get("image_height")
+    saved_width = preprocessing.get("image_width")
+    if (
+        isinstance(saved_height, int)
+        and not isinstance(saved_height, bool)
+        and isinstance(saved_width, int)
+        and not isinstance(saved_width, bool)
+    ):
+        saved_size = (saved_height, saved_width)
+    else:
+        # Older checkpoints stored the preprocessing tuple as (width, height).
+        target_size = preprocessing.get("target_size")
+        if (
+            isinstance(target_size, (list, tuple))
+            and len(target_size) == 2
+            and all(
+                isinstance(value, int) and not isinstance(value, bool)
+                for value in target_size
+            )
+        ):
+            saved_size = (target_size[1], target_size[0])
+        else:
+            raise ValueError(f"{label} is missing valid image_height/image_width metadata")
+
+    requested_size = (image_height, image_width)
+    if saved_size != requested_size:
+        raise ValueError(
+            f"{label} was trained at HxW {saved_size[0]}x{saved_size[1]}, "
+            f"but evaluation requested HxW {image_height}x{image_width}"
+        )
 
 
 def read_split(

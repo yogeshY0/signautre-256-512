@@ -92,6 +92,11 @@ class BinarizeInkTests(unittest.TestCase):
             binarize_ink(np.zeros((4, 4), dtype=np.float32))
 
 class DescribeImageTests(unittest.TestCase):
+    def test_rejects_unvalidated_image_size(self) -> None:
+        image = np.full((256, 512), 255, dtype=np.uint8)
+        with self.assertRaisesRegex(ValueError, "support only HxW 192x384"):
+            describe_image(image)
+
     def test_returns_bounded_scalars_and_profiles(self) -> None:
         descriptors = describe_image(_signature_image())
         self.assertIsInstance(descriptors, SignatureDescriptors)
@@ -172,6 +177,10 @@ class HandSimilarityVectorTests(unittest.TestCase):
 
 
 class DescribeRecordsTests(unittest.TestCase):
+    def test_rejects_unvalidated_image_size(self) -> None:
+        with self.assertRaisesRegex(ValueError, "support only HxW 192x384"):
+            describe_records([], image_height=256, image_width=512)
+
     def test_reads_through_the_shared_loader(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

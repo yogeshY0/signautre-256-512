@@ -63,7 +63,7 @@ from scoring.fusion import (
     load_fusion_config,
     score_queries,
 )
-from scoring.handcrafted_features import describe_records
+from scoring.handcrafted_features import describe_records, require_supported_image_size
 from scoring.metrics import (
     auc,
     bootstrap_ci,
@@ -78,6 +78,7 @@ from training.stage3_metric_learning import (
     embed_records,
     read_split,
     source_group,
+    validate_checkpoint_image_size,
 )
 
 
@@ -777,7 +778,9 @@ def main() -> None:
         help="Fusion config; fusion is opt-in and report-only.",
     )
     parser.add_argument(
+        "--report",
         "--fusion-report",
+        dest="report_path",
         type=Path,
         help="Also write the JSON report here.",
     )
@@ -818,9 +821,20 @@ def main() -> None:
         parser.error("--target-far must be strictly between 0 and 1")
     if args.bootstrap < 0:
         parser.error("--bootstrap cannot be negative")
+    if args.fusion_config is not None:
+        try:
+            require_supported_image_size(args.image_height, args.image_width)
+        except ValueError as error:
+            parser.error(str(error))
 
     root = (args.image_root or args.manifest.parent).resolve()
     checkpoint = torch.load(args.checkpoint, map_location="cpu")
+    validate_checkpoint_image_size(
+        checkpoint,
+        image_height=args.image_height,
+        image_width=args.image_width,
+        checkpoint_path=args.checkpoint,
+    )
     model = SiameseSignatureModel(
         pretrained=False, embedding_dim=checkpoint["embedding_dim"]
     )
@@ -1159,8 +1173,8 @@ def main() -> None:
 
     text = json.dumps(report, indent=2)
     print(text)
-    if args.fusion_report is not None:
-        destination = Path(args.fusion_report).expanduser().resolve()
+    if args.report_path is not None:
+        destination = Path(args.report_path).expanduser().resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(text + "\n", encoding="utf-8")
 

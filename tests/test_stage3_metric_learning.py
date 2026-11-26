@@ -23,7 +23,44 @@ from training.stage3_metric_learning import (
     SignatureRecord,
     load_manifest,
     triplet_loss,
+    validate_checkpoint_image_size,
 )
+
+
+class CheckpointImageSizeTests(unittest.TestCase):
+    def test_accepts_matching_non_square_dimensions(self) -> None:
+        validate_checkpoint_image_size(
+            {
+                "preprocessing": {
+                    "image_height": 256,
+                    "image_width": 512,
+                    "target_size": [512, 256],
+                }
+            },
+            image_height=256,
+            image_width=512,
+        )
+
+    def test_rejects_swapped_non_square_dimensions(self) -> None:
+        with self.assertRaisesRegex(ValueError, "trained at HxW 256x512"):
+            validate_checkpoint_image_size(
+                {
+                    "preprocessing": {
+                        "image_height": 256,
+                        "image_width": 512,
+                        "target_size": [512, 256],
+                    }
+                },
+                image_height=512,
+                image_width=256,
+            )
+
+    def test_reads_legacy_width_height_target_size(self) -> None:
+        validate_checkpoint_image_size(
+            {"preprocessing": {"target_size": [384, 192]}},
+            image_height=192,
+            image_width=384,
+        )
 
 
 class ManifestTests(unittest.TestCase):
@@ -61,6 +98,20 @@ class ManifestTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "disjoint across train, val, and test"):
                 load_manifest(manifest)
+
+
+class PreprocessingSizeTests(unittest.TestCase):
+    def test_raw_image_accepts_height_without_explicit_width(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "raw.png"
+            image = np.full((60, 120), 255, dtype=np.uint8)
+            cv2.line(image, (8, 30), (112, 30), 0, 3)
+            self.assertTrue(cv2.imwrite(str(path), image))
+
+            processed = load_preprocessed_image(path, image_height=64)
+
+            self.assertEqual(processed.shape, (64, 384))
+            self.assertEqual(processed.dtype, np.uint8)
 
 
 class PKBatchSamplerTests(unittest.TestCase):

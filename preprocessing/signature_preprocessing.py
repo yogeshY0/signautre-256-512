@@ -231,9 +231,9 @@ def load_preprocessed_image(
     if image is None:
         raise FileNotFoundError(f"could not read signature image: {image_path}")
 
+    expected_width = image_width if image_width is not None else target_size[0]
+    expected_height = image_height if image_height is not None else target_size[1]
     if already_preprocessed:
-        expected_width = image_width if image_width is not None else target_size[0]
-        expected_height = image_height if image_height is not None else target_size[1]
         expected_shape = (expected_height, expected_width)
         if image.shape != expected_shape:
             raise ValueError(
@@ -249,8 +249,7 @@ def load_preprocessed_image(
         raise ValueError(f"unsupported ink polarity: {ink}")
     return preprocess_signature(
         image,
-        target_size=(expected_width if image_width is not None else target_size[0],
-                     expected_height if image_height is not None else target_size[1]),
+        target_size=(expected_width, expected_height),
         ink=ink,
     )
 

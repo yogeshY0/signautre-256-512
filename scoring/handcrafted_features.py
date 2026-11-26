@@ -39,6 +39,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, avoids a runtime import cyc
 
 # Number of bins used for the row and column projection profiles.
 PROFILE_BINS = 128
+SUPPORTED_IMAGE_HEIGHT = 192
+SUPPORTED_IMAGE_WIDTH = 384
 
 # A pixel is treated as ink when it is darker than this value. The Stage 2.2 output is
 # dark ink on white, so a fixed cut is safe and avoids re-estimating Otsu per image.
@@ -62,6 +64,24 @@ DISTANCE_FEATURES = ("x_slant_diff",)
 # Declared order of the fused handcrafted vector. Fixed so saved fusion coefficients
 # always line up with the columns produced here.
 FEATURE_NAMES = SIMILARITY_FEATURES[:4] + DISTANCE_FEATURES + SIMILARITY_FEATURES[4:]
+
+
+def require_supported_image_size(
+    image_height: int | None,
+    image_width: int | None,
+) -> None:
+    """Reject fusion features for image dimensions they have not been validated on."""
+    resolved_height = SUPPORTED_IMAGE_HEIGHT if image_height is None else image_height
+    resolved_width = SUPPORTED_IMAGE_WIDTH if image_width is None else image_width
+    if (resolved_height, resolved_width) != (
+        SUPPORTED_IMAGE_HEIGHT,
+        SUPPORTED_IMAGE_WIDTH,
+    ):
+        raise ValueError(
+            "handcrafted fusion features support only HxW "
+            f"{SUPPORTED_IMAGE_HEIGHT}x{SUPPORTED_IMAGE_WIDTH}; got "
+            f"{resolved_height}x{resolved_width}"
+        )
 
 
 def _as_gray(image: np.ndarray) -> np.ndarray:
@@ -283,6 +303,7 @@ def describe_image(
         ValueError: If the image is invalid or contains no ink.
     """
     gray = _as_gray(image)
+    require_supported_image_size(gray.shape[0], gray.shape[1])
     ink = binarize_ink(gray, threshold=threshold)
     skeleton = _zhang_suen_thinning(ink)
 
@@ -409,6 +430,7 @@ def describe_records(
         image_height: Expected/explicit preprocessed height; ``None`` uses the default.
         image_width: Expected/explicit preprocessed width; ``None`` uses the default.
     """
+    require_supported_image_size(image_height, image_width)
     descriptors: list[SignatureDescriptors] = []
     total = len(records)
     for index, record in enumerate(records, start=1):

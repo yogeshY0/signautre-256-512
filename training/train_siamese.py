@@ -279,7 +279,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--augment",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="Group-1 augmentation on the train split only (val/test are never augmented)",
     )
     parser.add_argument(
@@ -406,6 +406,23 @@ def main() -> None:
         forgeries_per_signer=args.forgeries_per_signer,
         balance_datasets=args.balance_datasets,
         seed=args.seed,
+    )
+    max_batch_images = args.signers_per_batch * (
+        args.genuine_per_signer + args.forgeries_per_signer
+    )
+    image_batch_mib = (
+        max_batch_images
+        * 3
+        * args.image_height
+        * args.image_width
+        * np.dtype(np.float32).itemsize
+        / (1024**2)
+    )
+    print(
+        f"configured maximum input batch: "
+        f"({max_batch_images}, 3, {args.image_height}, {args.image_width}) float32; "
+        f"image tensor estimate {image_batch_mib:.1f} MiB "
+        "(excludes model activations, gradients, and optimizer state)"
     )
     validation_eligible_signers = {
         record.signer_id

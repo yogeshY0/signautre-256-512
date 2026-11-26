@@ -23,6 +23,18 @@ from training.stage3_metric_learning import SignatureRecord
 REFERENCES = 1
 
 
+class TrainingDefaultsTests(unittest.TestCase):
+    def test_augmentation_is_opt_in(self) -> None:
+        with mock.patch("sys.argv", ["train_siamese", "--manifest", "manifest.csv"]):
+            self.assertFalse(train_siamese._parse_args().augment)
+
+        with mock.patch(
+            "sys.argv",
+            ["train_siamese", "--manifest", "manifest.csv", "--augment"],
+        ):
+            self.assertTrue(train_siamese._parse_args().augment)
+
+
 def _records() -> list[SignatureRecord]:
     """Three signers, each with two genuine signatures and one skilled forgery."""
     return [

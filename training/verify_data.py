@@ -2,7 +2,7 @@
 
 Three independent layers, nothing is modified:
 
-1. manifest: required columns, no empty cells, no duplicate paths, strict
+1. manifest: required columns, no empty cells, no duplicate paths, case-insensitive
    true/false booleans, signer-disjoint splits, per-split row and signer counts,
    and a genuine plus a forgery for every signer
 2. images: every row exists, decodes as uint8 grayscale 256x512, is not blank,
@@ -17,8 +17,8 @@ own folder unless ``--image-root`` overrides it; a path that escapes that root i
 reported as a failure rather than read.
 
 Usage:
-    python -m training.verify_data --manifest training_clean/manifest_aug.csv
-    python -m training.verify_data --manifest training_clean/manifest_aug.csv --skip-augment
+    python -m training.verify_data --manifest training_clean/manifest_clean.csv
+    python -m training.verify_data --manifest training_clean/manifest_clean.csv --skip-augment
 
 Exit code is 0 when every section passes and 1 otherwise.
 """
@@ -158,9 +158,13 @@ def verify_manifest(manifest_path: Path) -> tuple[Section, list[dict[str, str]]]
             section.fail(f"row {line_number}: empty cell(s) in {', '.join(empty)}")
             continue
 
-        split, is_forgery = values["split"], values["is_forgery"]
+        split = values["split"]
+        is_forgery = values["is_forgery"].lower()
         if is_forgery not in VALID_BOOLEANS:
-            section.fail(f"row {line_number}: is_forgery={is_forgery!r}, expected true/false")
+            section.fail(
+                f"row {line_number}: is_forgery={values['is_forgery']!r}, "
+                "expected true/false"
+            )
             continue
         if split.lower() not in VALID_SPLITS:
             section.fail(f"row {line_number}: split={split!r}, expected train/val/test")
@@ -213,8 +217,8 @@ def verify_manifest(manifest_path: Path) -> tuple[Section, list[dict[str, str]]]
         f" | datasets: {dict(sorted(datasets.items()))}"
     )
     section.note(
-        f"genuine per signer: min {min(genuine.values())}"
-        f" | forgeries per signer: min {min(forgeries.values())}"
+        f"genuine per signer: min {min(genuine.values()) if genuine else 'n/a'}"
+        f" | forgeries per signer: min {min(forgeries.values()) if forgeries else 'n/a'}"
     )
     return section, rows
 

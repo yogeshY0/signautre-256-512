@@ -56,6 +56,7 @@ from training.stage3_metric_learning import (  # noqa: E402
     SiameseSignatureModel,
     embed_records,
     read_split,
+    validate_checkpoint_image_size,
 )
 
 KINDS = ("genuine", "skilled", "random")
@@ -367,19 +368,18 @@ def main() -> None:
     root = (args.image_root or manifest_path.parent).resolve()
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    validate_checkpoint_image_size(
+        checkpoint,
+        image_height=args.image_height,
+        image_width=args.image_width,
+        checkpoint_path=checkpoint_path,
+    )
     model = SiameseSignatureModel(
         pretrained=False, embedding_dim=checkpoint["embedding_dim"]
     )
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(args.device)
 
-    preprocessing = checkpoint.get("preprocessing", {})
-    fitted_size = (preprocessing.get("image_height"), preprocessing.get("image_width"))
-    if fitted_size != (None, None) and fitted_size != (args.image_height, args.image_width):
-        print(
-            f"warning: checkpoint was trained at HxW {fitted_size}, "
-            f"auditing at ({args.image_height}, {args.image_width})"
-        )
     print(f"checkpoint:   {checkpoint_path}")
     print(
         "checkpoint metadata: "
